@@ -9,6 +9,7 @@ import { OrderPanel } from './components/OrderPanel';
 import { OrderForm } from './components/OrderForm';
 import { MetricsPanel } from './components/MetricsPanel';
 import { PolyDebugOrder } from './components/PolyDebugOrder';
+import { MentionSignalsPanel } from './components/MentionSignalsPanel';
 import { useWebSocket } from './hooks/useWebSocket';
 import { MatchedMarketData, OrderbookDepthResponse } from './types';
 
@@ -59,7 +60,7 @@ function App() {
       : `${window.location.protocol}//${window.location.host}`;
   }, []);
   
-  const { matchedMarkets, isConnected, stats, lastUpdateTime, updateCount, dataCoverage, metrics } = useWebSocket(wsUrl);
+  const { matchedMarkets, isConnected, stats, lastUpdateTime, updateCount, dataCoverage, metrics, mentionSignals, mentionStatus } = useWebSocket(wsUrl);
   // Calculate total profit from matched markets with arbitrage opportunities.
   const totalProfit = matchedMarkets
     .filter(m => m.has_opportunity)
@@ -74,7 +75,7 @@ function App() {
         `${market.kalshi_market_id}_${market.polymarket_market_id}` === selectedMarketKey,
     ) ?? null;
   }, [matchedMarkets, selectedMarketKey]);
-  const [rightPanelTab, setRightPanelTab] = useState<'detail' | 'tracking'>('detail');
+  const [rightPanelTab, setRightPanelTab] = useState<'detail' | 'tracking' | 'mention'>('detail');
   const [leftBottomTab, setLeftBottomTab] = useState<'positions' | 'history'>('positions');
   const [showHistoryExplorer, setShowHistoryExplorer] = useState(false);
   const [showPolyDebug, setShowPolyDebug] = useState(false);
@@ -206,6 +207,16 @@ function App() {
                 onClick={() => setRightPanelTab('tracking')}
               >
                 🎯 Tracking
+              </button>
+              <button
+                className={`flex-1 px-2 py-1.5 text-[10px] font-medium transition-colors border-b-2 ${
+                  rightPanelTab === 'mention'
+                    ? 'text-amber-300 border-amber-300 bg-[--bg-secondary]'
+                    : 'text-[--text-muted] hover:text-[--text-secondary] border-transparent'
+                }`}
+                onClick={() => setRightPanelTab('mention')}
+              >
+                Mention
               </button>
             </div>
 
@@ -433,8 +444,10 @@ function App() {
                     <div className="text-[10px] text-[--text-muted] mt-1">View details and place trades</div>
                   </div>
                 )
-              ) : (
+              ) : rightPanelTab === 'tracking' ? (
                 <TrackingPanel apiBaseUrl={apiBaseUrl} />
+              ) : (
+                <MentionSignalsPanel apiBaseUrl={apiBaseUrl} signals={mentionSignals} status={mentionStatus} />
               )}
             </div>
           </div>

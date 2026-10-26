@@ -3,7 +3,7 @@
 //! Handles loading and parsing of TOML configuration files.
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
@@ -157,6 +157,115 @@ fn default_telegram_enabled() -> bool {
     false
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MentionMode {
+    Off,
+    Paper,
+    Live,
+}
+
+impl Default for MentionMode {
+    fn default() -> Self {
+        Self::Off
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct MentionConfig {
+    pub mode: MentionMode,
+    pub signal_url: String,
+    pub poll_interval_secs: u64,
+    pub max_signal_age_secs: u64,
+    pub bankroll_usd: f64,
+    pub kelly_fraction: f64,
+    pub min_net_edge: f64,
+    pub max_spread: f64,
+    pub min_book_depth_contracts: i32,
+    pub max_close_minutes: i64,
+    pub allow_hold_to_settlement: bool,
+    pub pre_event_only: bool,
+    pub max_market_risk_pct: f64,
+    pub max_event_risk_pct: f64,
+    pub max_day_risk_pct: f64,
+    pub max_total_open_risk_pct: f64,
+    pub max_open_positions: i32,
+    pub daily_loss_breaker_pct: f64,
+    pub live_gate_min_days: i64,
+    pub live_gate_max_age_days: i64,
+}
+
+impl Default for MentionConfig {
+    fn default() -> Self {
+        Self {
+            mode: MentionMode::Off,
+            signal_url: "http://127.0.0.1:8765".to_string(),
+            poll_interval_secs: 10,
+            max_signal_age_secs: 60,
+            bankroll_usd: 1000.0,
+            kelly_fraction: 0.25,
+            min_net_edge: 0.03,
+            max_spread: 0.10,
+            min_book_depth_contracts: 1,
+            max_close_minutes: 15,
+            allow_hold_to_settlement: false,
+            pre_event_only: true,
+            max_market_risk_pct: 0.01,
+            max_event_risk_pct: 0.02,
+            max_day_risk_pct: 0.03,
+            max_total_open_risk_pct: 0.05,
+            max_open_positions: 5,
+            daily_loss_breaker_pct: 0.03,
+            live_gate_min_days: 60,
+            live_gate_max_age_days: 14,
+        }
+    }
+}
+
+impl MentionConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        let finite_positive = [self.bankroll_usd, self.min_net_edge]
+            .into_iter()
+            .all(|value| value.is_finite() && value > 0.0);
+        if !finite_positive {
+            return Err("mention bankroll and min_net_edge must be finite and positive".into());
+        }
+        if !self.kelly_fraction.is_finite() || !(0.0..=1.0).contains(&self.kelly_fraction) {
+            return Err("mention kelly_fraction must be finite and in [0,1]".into());
+        }
+        if !self.max_spread.is_finite() || !(0.0..1.0).contains(&self.max_spread) {
+            return Err("mention max_spread must be finite and in (0,1)".into());
+        }
+        let risk_caps = [
+            self.max_market_risk_pct,
+            self.max_event_risk_pct,
+            self.max_day_risk_pct,
+            self.max_total_open_risk_pct,
+            self.daily_loss_breaker_pct,
+        ];
+        if risk_caps
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0 || *value > 1.0)
+        {
+            return Err("mention risk percentages must be finite and in (0,1]".into());
+        }
+        if self.max_signal_age_secs == 0
+            || self.poll_interval_secs == 0
+            || self.min_book_depth_contracts <= 0
+            || self.max_close_minutes < 0
+            || self.max_open_positions <= 0
+            || self.live_gate_min_days <= 0
+            || self.live_gate_max_age_days <= 0
+        {
+            return Err(
+                "mention ages, counts, depth, and gate requirements must be positive".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
 impl Default for TelegramConfig {
     fn default() -> Self {
         Self {
@@ -178,6 +287,8 @@ pub struct Config {
     pub auth: AuthConfig,
     #[serde(default)]
     pub telegram: TelegramConfig,
+    #[serde(default)]
+    pub mention: MentionConfig,
 }
 
 impl Config {

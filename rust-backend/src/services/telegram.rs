@@ -30,6 +30,15 @@ impl TelegramClient {
         self.config.enabled && !self.config.bot_token.is_empty() && !self.config.chat_id.is_empty()
     }
 
+    pub async fn send_alert(&self, message: &str) {
+        if !self.is_enabled() {
+            return;
+        }
+        if let Err(error) = self.send_message(message).await {
+            error!("Telegram alert send failed: {:#}", error);
+        }
+    }
+
     /// Send auto-trade notification
     pub async fn send_auto_trade_notification(
         &self,

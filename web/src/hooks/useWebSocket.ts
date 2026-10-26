@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { WsMessage, LogEntry, DataCoverage, MatchedMarketData, MetricsReport } from '../types';
+import { WsMessage, LogEntry, DataCoverage, MatchedMarketData, MetricsReport, MentionSignalRow, MentionStatus } from '../types';
 
 export function useWebSocket(url: string) {
   const [matchedMarkets, setMatchedMarkets] = useState<MatchedMarketData[]>([]); // All matched markets, including arbitrage information
@@ -28,6 +28,8 @@ export function useWebSocket(url: string) {
     polymarket_source: 'rest_polling',
   });
   const [metrics, setMetrics] = useState<MetricsReport | null>(null);
+  const [mentionSignals, setMentionSignals] = useState<MentionSignalRow[]>([]);
+  const [mentionStatus, setMentionStatus] = useState<MentionStatus | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   // Track price changes for highlight animations.
   const prevPricesRef = useRef<Map<string, { k_yes: number; k_no: number; p_yes: number; p_no: number }>>(new Map());
@@ -148,6 +150,13 @@ export function useWebSocket(url: string) {
           }
           break;
 
+        case 'mention_signals':
+          if (Array.isArray(message.data)) {
+            setMentionSignals(message.data as MentionSignalRow[]);
+            if (message.status) setMentionStatus(message.status);
+          }
+          break;
+
         default:
           break;
       }
@@ -242,5 +251,7 @@ export function useWebSocket(url: string) {
     stats,
     dataCoverage,
     metrics,
+    mentionSignals,
+    mentionStatus,
   };
 }

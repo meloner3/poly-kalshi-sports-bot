@@ -519,6 +519,11 @@ pub enum WsMessage {
     },
     #[serde(rename = "metrics")]
     Metrics { data: MetricsReport },
+    #[serde(rename = "mention_signals")]
+    MentionSignals {
+        data: Vec<serde_json::Value>,
+        status: serde_json::Value,
+    },
     #[serde(rename = "scan_stats")]
     ScanStats { data: ScanStats },
     #[serde(rename = "log")]

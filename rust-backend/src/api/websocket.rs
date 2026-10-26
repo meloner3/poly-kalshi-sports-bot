@@ -67,6 +67,17 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 let _ = tx.send(json).await;
             }
         }
+
+        let status = state.directional_execution.status().unwrap_or_else(|error| {
+            serde_json::json!({"mode":"off","error":error.to_string()})
+        });
+        let message = WsMessage::MentionSignals {
+            data: state.directional_execution.signal_dashboard(),
+            status,
+        };
+        if let Ok(json) = serde_json::to_string(&message) {
+            let _ = tx.send(json).await;
+        }
     }
 
     // Subscribe to opportunity updates and scan stats
@@ -156,6 +167,26 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         }
     });
 
+    let state_mentions = state.clone();
+    let tx_mentions = tx.clone();
+    let mention_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+            let executor = &state_mentions.directional_execution;
+            let status = executor.status().unwrap_or_else(|error| {
+                serde_json::json!({"mode":"off","error":error.to_string()})
+            });
+            let message = WsMessage::MentionSignals {
+                data: executor.signal_dashboard(),
+                status,
+            };
+            if let Ok(json) = serde_json::to_string(&message) {
+                if tx_mentions.send(json).await.is_err() { break; }
+            }
+        }
+    });
+
     // Spawn task to send messages to WebSocket
     let send_task = tokio::spawn(async move {
         while let Some(json) = rx.recv().await {
@@ -192,6 +223,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     opportunity_task.abort();
     scan_stats_task.abort();
     metrics_task.abort();
+    mention_task.abort();
     send_task.abort();
 
     info!("WebSocket client disconnected");

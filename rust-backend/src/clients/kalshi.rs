@@ -65,6 +65,8 @@ pub struct KalshiClient {
     orderbook_cache: Arc<RwLock<HashMap<String, OrderBook>>>,
     /// Channel sender for dynamic subscriptions/unsubscriptions
     command_tx: Arc<RwLock<Option<mpsc::Sender<KalshiWsCommand>>>>,
+    /// Mention tickers re-subscribed on reconnect; empty unless directional is running.
+    directional_subscriptions: Arc<RwLock<HashSet<String>>>,
     /// Incremented every time a new WebSocket connection is established.
     /// Kalshi only pushes `orderbook_delta` on real book changes, not on a
     /// heartbeat, so "time since last delta" is the wrong staleness signal
@@ -214,6 +216,7 @@ impl KalshiClient {
             signing_key,
             orderbook_cache: Arc::new(RwLock::new(HashMap::new())),
             command_tx: Arc::new(RwLock::new(None)),
+            directional_subscriptions: Arc::new(RwLock::new(HashSet::new())),
             connection_epoch: Arc::new(AtomicU64::new(0)),
             last_message_at: Arc::new(RwLock::new(None)),
         })
@@ -499,6 +502,21 @@ impl KalshiClient {
         self.post("/portfolio/events/orders", &body).await
     }
 
+    pub async fn place_order_with_client_order_id(
+        &self,
+        ticker: &str,
+        action: &str,
+        outcome: &str,
+        count: i32,
+        price: i32,
+        client_order_id: &str,
+    ) -> Result<Value> {
+        let (book_side, yes_price_cents) = v2_order_book_side_and_price(action, outcome, price)?;
+        let body =
+            v2_order_payload_with_id(ticker, book_side, count, yes_price_cents, client_order_id)?;
+        self.post("/portfolio/events/orders", &body).await
+    }
+
     /// Submit an IOC order and parse only explicit fill data from the
     /// acknowledgement. Unknown acknowledgement shapes fail closed.
     pub async fn submit_order(
@@ -511,6 +529,28 @@ impl KalshiClient {
     ) -> Result<KalshiOrderResult> {
         let response = self
             .place_order(ticker, action, outcome, count, price)
+            .await?;
+        Ok(parse_kalshi_order_result(&response, outcome))
+    }
+
+    pub async fn submit_order_with_client_order_id(
+        &self,
+        ticker: &str,
+        action: &str,
+        outcome: &str,
+        count: i32,
+        price: i32,
+        client_order_id: &str,
+    ) -> Result<KalshiOrderResult> {
+        let response = self
+            .place_order_with_client_order_id(
+                ticker,
+                action,
+                outcome,
+                count,
+                price,
+                client_order_id,
+            )
             .await?;
         Ok(parse_kalshi_order_result(&response, outcome))
     }
@@ -528,9 +568,53 @@ impl KalshiClient {
         self.get(&path).await
     }
 
+    /// Kalshi returns `client_order_id` on each order but does not expose it
+    /// as a server-side filter. Page the documented time-window query and
+    /// match the exact id locally. Absence is not proof of non-submission when
+    /// the scan fails or the order has moved to historical storage.
+    pub async fn get_order_by_client_order_id(
+        &self,
+        client_order_id: &str,
+        min_timestamp: i64,
+    ) -> Result<Option<Value>> {
+        let mut cursor: Option<String> = None;
+        for _ in 0..100 {
+            let path = {
+                let mut query = url::form_urlencoded::Serializer::new(String::new());
+                query.append_pair("min_ts", &min_timestamp.to_string());
+                query.append_pair("limit", "1000");
+                if let Some(value) = cursor.as_deref() {
+                    query.append_pair("cursor", value);
+                }
+                format!("/portfolio/orders?{}", query.finish())
+            };
+            let response = self.get(&path).await?;
+            let orders = response["orders"]
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("Invalid Kalshi orders response"))?;
+            if let Some(order) = orders
+                .iter()
+                .find(|order| order["client_order_id"].as_str() == Some(client_order_id))
+            {
+                return Ok(Some(order.clone()));
+            }
+            let next = response["cursor"].as_str().unwrap_or_default();
+            if next.is_empty() || orders.is_empty() {
+                return Ok(None);
+            }
+            cursor = Some(next.to_string());
+        }
+        anyhow::bail!("Kalshi order lookup exceeded pagination safety limit")
+    }
+
     /// Get positions
     pub async fn get_positions(&self) -> Result<Value> {
         self.get("/portfolio/positions").await
+    }
+
+    pub async fn get_market(&self, ticker: &str) -> Result<Value> {
+        let escaped = url::form_urlencoded::byte_serialize(ticker.as_bytes()).collect::<String>();
+        self.get(&format!("/markets/{escaped}")).await
     }
 
     /// Cancel an order
@@ -621,12 +705,44 @@ impl KalshiClient {
         }
     }
 
+    /// Directional (mention) variant of `subscribe_markets`. Records the tickers so they
+    /// are re-subscribed after a reconnect, then delegates to the shared hot-subscribe.
+    pub async fn subscribe_directional_markets(&self, tickers: Vec<String>) -> Result<bool> {
+        self.directional_subscriptions
+            .write()
+            .extend(tickers.iter().cloned());
+        self.subscribe_markets(tickers).await
+    }
+
+    /// Directional (mention) variant of `unsubscribe_markets`.
+    pub async fn unsubscribe_directional_markets(&self, tickers: Vec<String>) -> Result<bool> {
+        {
+            let mut subscriptions = self.directional_subscriptions.write();
+            for ticker in &tickers {
+                subscriptions.remove(ticker);
+            }
+        }
+        self.unsubscribe_markets(tickers).await
+    }
+
     /// Connect to WebSocket for real-time updates
     pub async fn connect_websocket(
         &self,
         tickers: Vec<String>,
         price_tx: mpsc::Sender<PriceUpdate>,
     ) -> Result<()> {
+        let mut tickers = tickers;
+        {
+            // Re-subscribe directional (mention) tickers after a reconnect. The set is
+            // empty unless the directional service is running, leaving the paired
+            // path's ticker list exactly as the caller supplied it.
+            let directional = self.directional_subscriptions.read();
+            for ticker in directional.iter() {
+                if !tickers.contains(ticker) {
+                    tickers.push(ticker.clone());
+                }
+            }
+        }
         let timestamp = Self::get_timestamp_ms();
         let signature = self.sign_request(timestamp, "GET", "/trade-api/ws/v2");
 
@@ -1045,7 +1161,24 @@ fn v2_order_payload(
     count: i32,
     yes_price_cents: i32,
 ) -> Result<Value> {
+    v2_order_payload_with_id(
+        ticker,
+        book_side,
+        count,
+        yes_price_cents,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+}
+
+fn v2_order_payload_with_id(
+    ticker: &str,
+    book_side: &str,
+    count: i32,
+    yes_price_cents: i32,
+    client_order_id: &str,
+) -> Result<Value> {
     if ticker.trim().is_empty()
+        || client_order_id.trim().is_empty()
         || count <= 0
         || !matches!(book_side, "bid" | "ask")
         || !(1..=99).contains(&yes_price_cents)
@@ -1055,7 +1188,7 @@ fn v2_order_payload(
 
     Ok(json!({
         "ticker": ticker,
-        "client_order_id": uuid::Uuid::new_v4().to_string(),
+        "client_order_id": client_order_id,
         "side": book_side,
         "count": format!("{count}.00"),
         "price": format!("{:.4}", yes_price_cents as f64 / 100.0),

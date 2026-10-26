@@ -12,6 +12,7 @@
 
 mod accounts;
 mod auto_trade;
+mod directional;
 mod health;
 mod history;
 mod markets;
@@ -22,6 +23,7 @@ mod stats;
 // Re-export all handlers
 pub use accounts::*;
 pub use auto_trade::*;
+pub use directional::*;
 pub use health::*;
 pub use history::*;
 pub use markets::*;

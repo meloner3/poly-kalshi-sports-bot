@@ -31,9 +31,94 @@ export interface ScanResponse {
   matched_count: number;
 }
 
+export interface MentionSignalRow {
+  signal: {
+    market_ticker: string;
+    event_id?: string | null;
+    event_day?: string | null;
+    phrase?: string | null;
+    p_hat: number | null;
+    p_lo: number | null;
+    p_hi: number | null;
+    model_version?: string | null;
+    status: string;
+    reason?: string | null;
+  };
+  signal_fresh: boolean;
+  yes_bid: number | null;
+  yes_ask: number | null;
+  no_bid: number | null;
+  no_ask: number | null;
+  net_edge_yes: number | null;
+  net_edge_no: number | null;
+}
+
+export interface MentionStatus {
+  mode: 'off' | 'paper' | 'live';
+  kill_switch: boolean;
+  loss_breaker: boolean;
+  breaker_day?: string | null;
+  today_realized_pnl?: number;
+  realized_pnl?: number;
+  today_realized_pnl_paper?: number;
+  today_realized_pnl_live?: number;
+  realized_pnl_paper?: number;
+  realized_pnl_live?: number;
+  open_positions?: number;
+  open_exposure?: number;
+  live_order_lookup_confirmed?: boolean;
+  signal_service_healthy?: boolean;
+  predictor_model_version?: string | null;
+  strategy_model_version?: string | null;
+  limits?: {
+    min_net_edge: number;
+    max_open_positions: number;
+    live_gate_min_days: number;
+    max_spread: number;
+    max_signal_age_secs: number;
+    pre_event_only: boolean;
+    bankroll_usd: number;
+  };
+  gate?: {
+    edge_estimate?: number | null;
+    ci_low?: number | null;
+    ci_high?: number | null;
+    n_days?: number;
+    as_of?: string | null;
+    live_gate_passed?: boolean;
+    status?: string;
+  } | null;
+  error?: string;
+}
+
+export interface MentionDecision {
+  id: number;
+  market_ticker: string;
+  side?: string | null;
+  net_edge?: number | null;
+  decision: string;
+  reason: string;
+  created_at: string;
+}
+
+export interface MentionPosition {
+  id: number;
+  market_ticker: string;
+  side: string;
+  mode: 'paper' | 'live';
+  contracts: number;
+  remaining_contracts: number;
+  entry_vwap: number;
+  net_pnl: number | null;
+  outcome_yes: number | boolean | null;
+  status: string;
+  created_at: string;
+}
+
 export interface WsMessage {
-  type: 'opportunity' | 'opportunities' | 'opportunities_list' | 'matched_markets_list' | 'scan_started' | 'scan_completed' | 'log' | 'ping' | 'pong' | 'connected' | 'stats' | 'metrics';
-  data?: ArbitrageOpportunity | ArbitrageOpportunity[] | MatchedMarketData[] | MetricsReport;
+  type: 'opportunity' | 'opportunities' | 'opportunities_list' | 'matched_markets_list' | 'scan_started' | 'scan_completed' | 'log' | 'ping' | 'pong' | 'connected' | 'stats' | 'metrics' | 'mention_signals';
+  data?: ArbitrageOpportunity | ArbitrageOpportunity[] | MatchedMarketData[] | MetricsReport | MentionSignalRow[];
+  status?: MentionStatus;
   kalshi_count?: number;
   polymarket_count?: number;
   matched_count?: number;

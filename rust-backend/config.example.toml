@@ -77,3 +77,29 @@ bot_token = "YOUR_BOT_TOKEN_HERE"
 # To obtain it, add the bot to a group, send a message, then visit
 # https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
 chat_id = "YOUR_CHAT_ID_HERE"
+
+# Independent directional Kalshi mention strategy. Kept separate from the
+# paired arbitrage auto-trader and OFF by default.
+[mention]
+mode = "off" # off | paper | live (live also requires a passing current paper gate)
+signal_url = "http://127.0.0.1:8765"
+poll_interval_secs = 10
+max_signal_age_secs = 60
+bankroll_usd = 1000.0
+kelly_fraction = 0.25
+min_net_edge = 0.03
+max_spread = 0.10
+min_book_depth_contracts = 1
+max_close_minutes = 15
+allow_hold_to_settlement = false
+# Only open positions before 00:00 US Eastern (conservatively 04:00 UTC) of the event date
+# parsed from the ticker; tickers with no parseable date are rejected. Exits are always allowed.
+pre_event_only = true
+max_market_risk_pct = 0.01
+max_event_risk_pct = 0.02
+max_day_risk_pct = 0.03
+max_total_open_risk_pct = 0.05
+max_open_positions = 5
+daily_loss_breaker_pct = 0.03
+live_gate_min_days = 60
+live_gate_max_age_days = 14

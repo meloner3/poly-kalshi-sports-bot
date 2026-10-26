@@ -1,0 +1,28 @@
+# kalshi_mention (vendored) — see VENDORED.md
+#
+# Trimmed from the upstream DelphiResearch requirements.txt: jupyterlab and
+# pymongo are not used by this package (kalshi_mention is sqlite+parquet only
+# and reads Mongo output as files, never connects).
+
+# Pinned to the set this vendored copy was verified against (104/104 tests
+# pass). This package's whole claim is reproducible numbers, so an unpinned
+# rebuild that silently drifts the numeric stack is a real risk. Upstream's
+# venv at vendoring time ran numpy 2.4.3 / pandas 3.0.1 / pyarrow 23.0.1 —
+# patch-level differences below, with scikit-learn and scipy identical.
+requests==2.34.2
+beautifulsoup4==4.15.0
+python-dotenv==1.2.3
+pandas==3.0.5
+numpy==2.4.6
+pyarrow==25.0.1
+python-dateutil==2.9.0.post0
+tqdm==4.70.0
+scikit-learn==1.9.1
+scipy==1.17.1
+pytest==9.1.1
+
+# Component C (LM Monte Carlo simulator) only. Heavy, and the project's own
+# conclusion is that running it is not on the backlog — left commented, as
+# upstream.
+# torch
+# transformers
