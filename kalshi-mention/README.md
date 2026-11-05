@@ -37,6 +37,22 @@ Override the data root with `KALSHI_MENTION_DATA_DIR`:
 export KALSHI_MENTION_DATA_DIR=~/Desktop/kalshi_data     # e.g. run off the backup
 ```
 
+## Restoring the committed data
+
+The corpus and database are committed under `data/kalshi_mention/` (force-added,
+because `data/` is gitignored): `trump_transcripts_merged.parquet` and the
+xz-compressed `kalshi_mention.sqlite.xz` (702MB raw, 46MB compressed). Restore
+the database from the repository root with:
+
+```sh
+xz -dk data/kalshi_mention/kalshi_mention.sqlite.xz
+(cd data/kalshi_mention && shasum -a 256 -c kalshi_mention.sqlite.sha256)
+```
+
+The decompressed `.sqlite` stays gitignored. Do not commit it: GitHub rejects
+files over 100MB. Re-compress with `xz -9e -T0 -k` if the committed copy is
+refreshed, and update the `.sha256` file.
+
 ## Running it
 
 Use the repo venv (Python 3.11) from the repo root — **not** anaconda `base`,
@@ -79,7 +95,7 @@ The live-gate evaluator reads the Rust database and writes only
 `data/kalshi_mention/directional_evaluation/`. Run
 `python -m kalshi_mention.directional_evaluation --watch` during paper trading
 to refresh the gate every five minutes; the installed LaunchAgent runs a
-one-shot report refresh daily.
+one-shot report refresh daily.giv
 The evaluator opens the Rust database read-only. The gate interval is the
 two-sided 95% day-clustered bootstrap from `verdict.cluster_boot` (the same
 method as the historical verdict, and stricter than a one-sided bound); the
