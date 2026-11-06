@@ -34,7 +34,7 @@ const KALSHI_TRADING_FEE_RATE: f64 = 0.07;
 
 impl ArbitrageCalculator {
     /// Create a new arbitrage calculator
-    /// 
+    ///
     /// # Arguments
     /// * `min_profit_margin` - Minimum profit margin percentage to report (e.g., 0.1 = 0.1%)
     /// * `fixed_contract_count` - Fixed number of contracts to buy on each platform (e.g., 10)
@@ -163,7 +163,7 @@ impl ArbitrageCalculator {
     }
 
     /// Calculate a single strategy's arbitrage using Fixed Contract Strategy
-    /// 
+    ///
     /// Fixed Contract Strategy:
     /// - Buy same number of contracts on both platforms (default 10)
     /// - Guaranteed return = N × $1 (whichever side wins)
@@ -194,24 +194,24 @@ impl ArbitrageCalculator {
 
         // Fixed Contract Strategy: buy same number of contracts on both platforms
         let fixed_contracts = self.fixed_contract_count;
-        
+
         // Calculate actual costs
         let kalshi_bet = fixed_contracts * kalshi_price;
         let polymarket_bet = fixed_contracts * polymarket_price;
-        
+
         // Calculate Kalshi trading fee: fee = ceil(0.07 × C × P × (1-P))
         let kalshi_fee = self.calculate_kalshi_trading_fee(fixed_contracts, kalshi_price);
-        
+
         // Total investment including fee
         let total_bet = kalshi_bet + kalshi_fee + polymarket_bet;
-        
+
         // Guaranteed return: N contracts × $1 = $N (whichever side wins)
         let guaranteed_return = fixed_contracts;
-        
+
         // Calculate profit
         let gross_profit = guaranteed_return - (kalshi_bet + polymarket_bet);
         let expected_profit = guaranteed_return - total_bet;
-        
+
         // Calculate profit margin (after fees)
         let profit_margin = if total_bet > 0.0 {
             (expected_profit / total_bet) * 100.0
@@ -230,7 +230,11 @@ impl ArbitrageCalculator {
         );
         debug!(
             "   Kalshi {}: {:.2}¢, Poly {}: {:.2}¢, Sum: {:.4}",
-            kalshi_side, kalshi_price * 100.0, polymarket_side, polymarket_price * 100.0, implied_prob_sum
+            kalshi_side,
+            kalshi_price * 100.0,
+            polymarket_side,
+            polymarket_price * 100.0,
+            implied_prob_sum
         );
         debug!(
             "   Fixed contracts: {:.0}, Kalshi fee: ${:.2}",
@@ -265,9 +269,9 @@ impl ArbitrageCalculator {
             gross_profit,
             timestamp: Utc::now(),
             start_time: kalshi_market.start_time,
-            poly_ask_depth: 0.0,      // Will be set by WebSocketManager
-            poly_ask_size: 0.0,       // Will be set by WebSocketManager
-            kalshi_ask_depth: 0,      // Will be set by WebSocketManager
+            poly_ask_depth: 0.0, // Will be set by WebSocketManager
+            poly_ask_size: 0.0,  // Will be set by WebSocketManager
+            kalshi_ask_depth: 0, // Will be set by WebSocketManager
         })
     }
 }
@@ -292,11 +296,7 @@ mod tests {
 
         // Test another case: 0.07 * 50 * 0.3 * 0.7 = 0.735 -> ceil = 0.74
         let fee2 = calc.calculate_kalshi_trading_fee(50.0, 0.3);
-        assert!(
-            fee2 >= 0.73 && fee2 <= 0.75,
-            "Expected ~0.74, got {}",
-            fee2
-        );
+        assert!(fee2 >= 0.73 && fee2 <= 0.75, "Expected ~0.74, got {}", fee2);
 
         // Test edge cases
         assert_eq!(calc.calculate_kalshi_trading_fee(0.0, 0.5), 0.0);

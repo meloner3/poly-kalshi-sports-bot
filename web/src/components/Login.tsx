@@ -27,19 +27,19 @@ export function Login({ onLoginSuccess, apiBaseUrl }: LoginProps) {
 
       if (!response.ok) {
         const data = await response.json();
-        throw new Error(data.detail || '登录失败');
+        throw new Error(data.detail || 'Login failed');
       }
 
       const data = await response.json();
       
-      // 保存 token 到 localStorage
+      // Save the token to localStorage.
       localStorage.setItem('auth_token', data.access_token);
       localStorage.setItem('username', data.username);
       
-      // 通知父组件登录成功
+      // Notify the parent component of successful login.
       onLoginSuccess(data.access_token, data.username);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '登录失败，请重试');
+      setError(err instanceof Error ? err.message : 'Login failed. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -48,18 +48,18 @@ export function Login({ onLoginSuccess, apiBaseUrl }: LoginProps) {
   return (
     <div className="min-h-screen flex items-center justify-center bg-[--bg-primary]">
       <div className="w-full max-w-md">
-        {/* Logo 和标题 */}
+        {/* Logo and title */}
         <div className="text-center mb-8">
           <div className="text-5xl mb-4">🎯</div>
           <h1 className="text-2xl font-bold text-[--text-primary]">
-            预测市场套利系统
+            Prediction Market Arbitrage System
           </h1>
         </div>
 
-        {/* 登录表单 */}
+        {/* Login form */}
         <div className="card p-8">
           <form onSubmit={handleSubmit} className="space-y-4">
-            {/* 用户名 */}
+            {/* Username */}
             <div>
               <input
                 id="username"
@@ -73,11 +73,11 @@ export function Login({ onLoginSuccess, apiBaseUrl }: LoginProps) {
                          text-[--text-primary] placeholder-[--text-muted]
                          focus:outline-none focus:ring-2 focus:ring-[--accent-purple] focus:border-transparent
                          disabled:opacity-50 disabled:cursor-not-allowed"
-                placeholder="用户名"
+                placeholder="Username"
               />
             </div>
 
-            {/* 密码 */}
+            {/* Password */}
             <div>
               <input
                 id="password"
@@ -90,18 +90,18 @@ export function Login({ onLoginSuccess, apiBaseUrl }: LoginProps) {
                          text-[--text-primary] placeholder-[--text-muted]
                          focus:outline-none focus:ring-2 focus:ring-[--accent-purple] focus:border-transparent
                          disabled:opacity-50 disabled:cursor-not-allowed"
-                placeholder="密码"
+                placeholder="Password"
               />
             </div>
 
-            {/* 错误提示 */}
+            {/* Error message */}
             {error && (
               <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
                 <p className="text-sm text-red-400 text-center">{error}</p>
               </div>
             )}
 
-            {/* 登录按钮 */}
+            {/* Login button */}
             <button
               type="submit"
               disabled={loading || !username || !password}
@@ -110,7 +110,7 @@ export function Login({ onLoginSuccess, apiBaseUrl }: LoginProps) {
                        disabled:opacity-50 disabled:cursor-not-allowed
                        transition-colors"
             >
-              {loading ? '登录中...' : '登录'}
+              {loading ? 'Logging in...' : 'Log in'}
             </button>
           </form>
         </div>

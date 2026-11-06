@@ -1,119 +1,107 @@
 //! Polymarket platform client
 //!
 //! Handles Polymarket API interactions including:
-//! - Market data retrieval from Gamma API
-//! - WebSocket price subscription
-//! - Order placement via Python order service
-//! - Local orderbook maintenance for depth queries
+//! - Market data retrieval from the Polymarket US gateway
+//! - Ed25519-signed order placement directly against the Polymarket US API
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use futures_util::{SinkExt, StreamExt};
-use parking_lot::RwLock;
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use reqwest::{Client, Method, StatusCode};
+use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{error, info, warn};
+use tokio::sync::Mutex as AsyncMutex;
+use tracing::{debug, info, warn};
 
+use crate::clients::polymarket_auth;
 use crate::config::PolymarketConfig;
-use crate::core::normalize_team_name;
-use crate::models::{Platform, PolymarketEvent, PolymarketMarket, PriceUpdate};
+use crate::core::{competitor_event_name, normalize_competitor_name, normalize_team_name};
+use crate::models::{PolymarketEvent, PolymarketMarket, PolymarketPositionSide};
 
-/// Polymarket order book structure (price, size)
-#[derive(Debug, Clone, Default)]
-pub struct PolyOrderBook {
-    /// Bids sorted by price ascending (best bid = last)
-    pub bids: Vec<(f64, f64)>,
-    /// Asks sorted by price descending (best ask = last)
-    pub asks: Vec<(f64, f64)>,
+// Polymarket US sport codes for the supported tennis match-winner feeds.
+// Series IDs are resolved from /v1/sports at runtime so they are not baked in.
+const TENNIS_SPORT_CODES: &[&str] = &["atp", "wta", "itfm", "itfw", "itfme", "itfwo", "atpcq"];
+
+const RATE_LIMIT_MAX_RETRIES: u32 = 3;
+const BALANCE_CACHE_TTL: Duration = Duration::from_secs(30);
+const POSITIONS_CACHE_TTL: Duration = Duration::from_secs(30);
+// minimumTradeQty / orderPriceMinTickSize are static per-market validation
+// constraints, not live pricing data - cache them well past a single trading
+// session so we don't add a second live API call (and more rate-limit risk)
+// to every depth check and order attempt.
+const MARKET_CONSTRAINTS_CACHE_TTL: Duration = Duration::from_secs(3600);
+
+/// Fresh, normalized native Polymarket US LONG-price order book.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PolymarketMarketBook {
+    pub success: bool,
+    pub market_slug: String,
+    pub state: String,
+    pub transact_time: Option<String>,
+    pub fetched_at_ms: i64,
+    pub bids: Vec<PolymarketBookLevel>,
+    pub offers: Vec<PolymarketBookLevel>,
+    /// Per-market minimum tradeable quantity (contracts). None means the
+    /// order service could not look it up - callers must treat that as
+    /// "unknown minimum", never as "no minimum".
+    #[serde(default)]
+    pub minimum_trade_qty: Option<f64>,
+    /// Per-market required price increment. None means unknown, same
+    /// caveat as `minimum_trade_qty`.
+    #[serde(default)]
+    pub price_tick_size: Option<f64>,
 }
 
-impl PolyOrderBook {
-    /// Get best bid (highest price)
-    pub fn best_bid(&self) -> Option<(f64, f64)> {
-        self.bids.last().copied()
+#[derive(Debug, Clone, Deserialize)]
+pub struct PolymarketBookLevel {
+    pub price: f64,
+    pub quantity: f64,
+}
+
+impl PolymarketMarketBook {
+    /// Total executable buy-side depth for a competitor's native position,
+    /// from this same fresh CLOB book. Read-only reporting for tracking/UI
+    /// visibility — not used on the order-submission path.
+    ///
+    /// Mirrors the buy-side selection and complement pricing the execution
+    /// path applies: Long buys consume native LONG offers ascending; Short
+    /// buys consume native LONG bids descending at complement price.
+    /// Returns (usd_notional, token_size).
+    pub fn buy_depth(&self, position_side: PolymarketPositionSide) -> (f64, f64) {
+        let levels: &[PolymarketBookLevel] = match position_side {
+            PolymarketPositionSide::Long => &self.offers,
+            PolymarketPositionSide::Short => &self.bids,
+        };
+        levels
+            .iter()
+            .fold((0.0_f64, 0.0_f64), |(usd, size), level| {
+                let quantity = level.quantity.floor();
+                if quantity <= 0.0 {
+                    return (usd, size);
+                }
+                let price = match position_side {
+                    PolymarketPositionSide::Long => level.price,
+                    PolymarketPositionSide::Short => 1.0 - level.price,
+                };
+                (usd + quantity * price, size + quantity)
+            })
     }
-
-    /// Get best ask (lowest price)
-    pub fn best_ask(&self) -> Option<(f64, f64)> {
-        self.asks.last().copied()
-    }
-
-    /// 计算 asks 侧的可用深度（买入时使用）
-    /// 返回在指定金额内可获得的总深度（USD）
-    /// asks 降序排列，last 是 best_ask（最低卖价）
-    pub fn ask_depth(&self, max_amount: f64) -> f64 {
-        let mut depth = 0.0;
-        // 从 best_ask（最低价）开始累计
-        for (price, size) in self.asks.iter().rev() {
-            let level_value = price * size;
-            depth += level_value;
-            if depth >= max_amount {
-                return max_amount;
-            }
-        }
-        depth
-    }
-
-    /// 计算 bids 侧的可用深度（卖出时使用）
-    pub fn bid_depth(&self, max_amount: f64) -> f64 {
-        let mut depth = 0.0;
-        // 从 best_bid（最高价）开始累计
-        for (price, size) in self.bids.iter().rev() {
-            let level_value = price * size;
-            depth += level_value;
-            if depth >= max_amount {
-                return max_amount;
-            }
-        }
-        depth
-    }
 }
 
-const POLY_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
-
-// ==================== Python Order Service Types ====================
-
-/// Market order request to Python service
-#[derive(Debug, Serialize)]
-struct MarketOrderRequest {
-    token_id: String,
-    side: String,
-    amount: f64,
-    price: Option<f64>,  // Rust计算的价格（包含滑点），避免Python重复获取订单簿
-    order_type: Option<String>,
-}
-
-/// Limit order request to Python service
-#[derive(Debug, Serialize)]
-struct LimitOrderRequest {
-    token_id: String,
-    side: String,
-    price: f64,
-    size: f64,
-    order_type: Option<String>,
-}
-
-/// Cancel order request to Python service
-#[derive(Debug, Serialize)]
-struct CancelOrderRequest {
-    order_id: String,
-}
-
-/// Order response from Python service
-#[derive(Debug, Deserialize)]
-struct OrderResponse {
-    success: bool,
-    order_id: Option<String>,
-    status: Option<String>,
-    error: Option<String>,
-    data: Option<Value>,
-    latency_ms: Option<i64>,  // Python服务内部的API调用延迟
+/// Result returned by the official SDK execution envelope, normalized by the
+/// local Python service. A submission without a positive fill is not success.
+#[derive(Debug, Clone)]
+pub struct PolymarketOrderResult {
+    pub accepted: bool,
+    pub filled_contracts: i32,
+    pub fill_quantity_valid: bool,
+    pub order_id: Option<String>,
+    pub status: Option<String>,
+    pub error: Option<String>,
+    pub latency_ms: Option<i64>,
+    pub average_fill_price: Option<f64>,
 }
 
 /// Position data for aggregation (internal use)
@@ -127,281 +115,224 @@ struct PositionData {
     trade_count: u32,
 }
 
-/// Subscription command for Polymarket WebSocket
-#[derive(Debug, Clone)]
-pub enum PolyWsCommand {
-    Subscribe(Vec<String>),
-    Unsubscribe(Vec<String>),
-}
-
 /// Polymarket API client
 #[derive(Clone)]
 pub struct PolymarketClient {
     pub config: PolymarketConfig,
     http: Client,
-    /// Order book cache: token_id -> PolyOrderBook
-    orderbook_cache: Arc<RwLock<HashMap<String, PolyOrderBook>>>,
-    /// Channel sender for dynamic subscriptions/unsubscriptions
-    command_tx: Arc<RwLock<Option<mpsc::Sender<PolyWsCommand>>>>,
+    key_id: String,
+    secret_key: String,
+    balance_cache: std::sync::Arc<AsyncMutex<Option<(Instant, f64)>>>,
+    positions_cache: std::sync::Arc<AsyncMutex<Option<(Instant, Value)>>>,
+    market_constraints_cache:
+        std::sync::Arc<AsyncMutex<HashMap<String, (Instant, Option<f64>, Option<f64>)>>>,
+}
+
+/// Read Polymarket US API credentials, env vars first, falling back to
+/// config file values.
+pub fn resolve_credentials(config: &PolymarketConfig) -> Result<(String, String)> {
+    let key_id = std::env::var("POLYMARKET_KEY_ID")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| (!config.key_id.trim().is_empty()).then(|| config.key_id.clone()));
+    let secret_key = std::env::var("POLYMARKET_SECRET_KEY")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| (!config.secret_key.trim().is_empty()).then(|| config.secret_key.clone()));
+    match (key_id, secret_key) {
+        (Some(key_id), Some(secret_key)) => Ok((key_id, secret_key)),
+        _ => anyhow::bail!(
+            "Polymarket US credentials are required. Set POLYMARKET_KEY_ID and \
+             POLYMARKET_SECRET_KEY, or configure polymarket.key_id and polymarket.secret_key."
+        ),
+    }
 }
 
 impl PolymarketClient {
     /// Create a new Polymarket client
-    pub fn new(config: PolymarketConfig) -> Self {
-        Self {
-            config,
-            http: Client::new(),
-            orderbook_cache: Arc::new(RwLock::new(HashMap::new())),
-            command_tx: Arc::new(RwLock::new(None)),
-        }
-    }
+    pub fn new(config: PolymarketConfig) -> Result<Self> {
+        let (key_id, secret_key) = resolve_credentials(&config)?;
+        let http = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .context("Failed to build Polymarket HTTP client")?;
 
-    /// Get order book from cache
-    pub fn get_orderbook(&self, token_id: &str) -> Option<PolyOrderBook> {
-        self.orderbook_cache.read().get(token_id).cloned()
-    }
-
-    /// Initialize client (check if Python order service is available)
-    pub async fn init_clob(&mut self) -> Result<()> {
-        // Check if Python order service is running
-        let health_url = format!("{}/health", self.config.order_service_url);
-        match self.http.get(&health_url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                info!("✅ Polymarket Python 下单服务已连接: {}", self.config.order_service_url);
-            }
-            Ok(resp) => {
-                warn!("⚠️ Polymarket Python 下单服务返回非成功状态: {}", resp.status());
-            }
-            Err(e) => {
-                warn!("⚠️ Polymarket Python 下单服务未运行: {}. 下单功能将不可用.", e);
-            }
-        }
-        Ok(())
-    }
-
-    /// Get account balance via Python service
-    pub async fn get_balance(&self) -> Result<f64> {
-        let url = format!("{}/balance", self.config.order_service_url);
-        let resp = self.http.get(&url)
-            .send()
-            .await
-            .context("调用 Python 下单服务失败")?;
-
-        if !resp.status().is_success() {
-            anyhow::bail!("获取余额失败: HTTP {}", resp.status());
-        }
-
-        let data: Value = resp.json().await?;
-        if data.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
-            let balance = data.get("balance")
-                .and_then(|b| b.get("balance"))
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse::<f64>().ok())
-                .unwrap_or(0.0);
-            Ok(balance / 1_000_000.0) // USDC has 6 decimals
-        } else {
-            let error = data.get("error").and_then(|v| v.as_str()).unwrap_or("Unknown error");
-            anyhow::bail!("获取余额失败: {}", error)
-        }
-    }
-
-    /// Get NBA events and markets from Gamma API
-    pub async fn get_nba_events_and_markets(
-        &self,
-    ) -> Result<(Vec<PolymarketEvent>, Vec<PolymarketMarket>)> {
-        let mut events = Vec::new();
-        let mut markets = Vec::new();
-
-        // Step 1: Get sports leagues
-        let sports_url = format!("{}/sports", self.config.base_url);
-
-        let sports_response = self.http.get(&sports_url).send().await?;
-        if !sports_response.status().is_success() {
-            anyhow::bail!("Failed to get sports leagues: {}", sports_response.status());
-        }
-        let sports: Vec<Value> = sports_response.json().await?;
-
-        // Step 2: Find NBA league
-        let nba_league = sports
-            .iter()
-            .find(|s| {
-                let sport = s["sport"].as_str().unwrap_or("");
-                sport.to_uppercase().contains("NBA") && !sport.to_uppercase().contains("WNBA")
-            })
-            .ok_or_else(|| anyhow::anyhow!("NBA league not found"))?;
-
-        let series_id = nba_league["series"]
-            .as_str()
-            .or_else(|| nba_league["series"].as_i64().map(|_| ""))
-            .ok_or_else(|| anyhow::anyhow!("NBA series_id not found"))?;
-
-        // Step 3: Get NBA events
-        let events_url = format!(
-            "{}/events?series_id={}&tag_id=100639&active=true&closed=false&limit=100",
-            self.config.base_url, series_id
+        info!(
+            "✅ Initialized Polymarket US client with API key ID {}...",
+            &key_id[..key_id.len().min(8)]
         );
 
-        let events_response = self.http.get(&events_url).send().await?;
-        if !events_response.status().is_success() {
-            anyhow::bail!("Failed to get NBA events: {}", events_response.status());
-        }
-        let api_events: Vec<Value> = events_response.json().await?;
+        Ok(Self {
+            config,
+            http,
+            key_id,
+            secret_key,
+            balance_cache: std::sync::Arc::new(AsyncMutex::new(None)),
+            positions_cache: std::sync::Arc::new(AsyncMutex::new(None)),
+            market_constraints_cache: std::sync::Arc::new(AsyncMutex::new(HashMap::new())),
+        })
+    }
 
-        info!("📥 已获取 {} 个 Polymarket NBA 事件", api_events.len());
-
-        // Step 4: Process each event
-        for api_event in &api_events {
-            let event_title = api_event["title"].as_str().unwrap_or("");
-            let event_slug = api_event["slug"].as_str().unwrap_or("");
-            let event_markets = api_event["markets"].as_array();
-
-            // Extract date from slug
-            let event_date = extract_date_from_slug(event_slug);
-
-            if let Some(market_array) = event_markets {
-                for market_data in market_array {
-                    // Parse market data
-                    let market_id = market_data["id"].as_str().unwrap_or("");
-                    let condition_id = market_data["conditionId"]
-                        .as_str()
-                        .or_else(|| market_data["condition_id"].as_str())
-                        .unwrap_or(market_id)
-                        .to_string();
-
-                    if condition_id.is_empty() {
-                        continue;
-                    }
-
-                    let question = market_data["question"]
-                        .as_str()
-                        .unwrap_or(event_title);
-
-                    // Get outcomes and prices
-                    let outcomes_str = market_data["outcomes"].as_str();
-                    let prices_str = market_data["outcomePrices"].as_str();
-
-                    if outcomes_str.is_none() || prices_str.is_none() {
-                        continue;
-                    }
-
-                    let outcomes: Vec<String> = match serde_json::from_str(outcomes_str.unwrap()) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-                    let prices: Vec<String> = match serde_json::from_str(prices_str.unwrap()) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-
-                    // Must be binary market
-                    if outcomes.len() != 2 || prices.len() != 2 {
-                        continue;
-                    }
-
-                    let price1: f64 = match prices[0].parse() {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-                    let price2: f64 = match prices[1].parse() {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-
-                    // Validate prices
-                    if price1 < 0.0 || price1 > 1.0 || price2 < 0.0 || price2 > 1.0 {
-                        continue;
-                    }
-
-                    // Filter invalid prices
-                    if (price1 == 0.0 && price2 == 1.0) || (price1 == 1.0 && price2 == 0.0) {
-                        continue;
-                    }
-
-                    // Filter extreme prices
-                    if price1 < 0.01 || price2 < 0.01 || price1 > 0.99 || price2 > 0.99 {
-                        continue;
-                    }
-
-                    // Filter Yes/No markets
-                    if outcomes.iter().any(|o| o.to_lowercase() == "yes")
-                        && outcomes.iter().any(|o| o.to_lowercase() == "no")
-                    {
-                        continue;
-                    }
-
-                    // Only keep full game winner markets
-                    if question != event_title {
-                        continue;
-                    }
-
-                    // Filter Over/Under markets
-                    if outcomes[0].to_lowercase() == "over" || outcomes[0].to_lowercase() == "under" {
-                        continue;
-                    }
-
-                    // Normalize team names
-                    let team1_abbr = normalize_team_name(&outcomes[0]);
-                    let team2_abbr = normalize_team_name(&outcomes[1]);
-
-                    // Sort teams alphabetically (consistent with Kalshi)
-                    let (team_a, team_b, price_a, price_b, token_index_a, token_index_b) =
-                        if team1_abbr > team2_abbr {
-                            (team2_abbr, team1_abbr, price2, price1, 1, 0)
-                        } else {
-                            (team1_abbr, team2_abbr, price1, price2, 0, 1)
-                        };
-
-                    // Build standardized event name
-                    let event_name = format!("{}-{}", team_a, team_b);
-
-                    // Get volume
-                    let volume = market_data["volume"]
-                        .as_str()
-                        .and_then(|s| s.parse::<f64>().ok())
-                        .or_else(|| market_data["volume"].as_f64());
-
-                    // Get token IDs (for WebSocket subscription)
-                    let tokens_str = market_data["clobTokenIds"].as_str();
-                    let token_ids: Vec<String> = tokens_str
-                        .and_then(|s| serde_json::from_str(s).ok())
-                        .unwrap_or_default();
-
-                    let token_id_a = token_ids.get(token_index_a).cloned();
-                    let token_id_b = token_ids.get(token_index_b).cloned();
-
-                    // Create market
-                    let market = PolymarketMarket {
-                        market_id: condition_id.clone(),
-                        event_name: event_name.clone(),
-                        team_a: team_a.clone(),
-                        team_b: team_b.clone(),
-                        price_a,
-                        price_b,
-                        start_time: event_date,
-                        volume,
-                        token_id_a,
-                        token_id_b,
-                    };
-
-                    // Create event
-                    let event = PolymarketEvent {
-                        event_id: condition_id.clone(),
-                        name: event_name.clone(),
-                        team_a: team_a.clone(),
-                        team_b: team_b.clone(),
-                        start_time: event_date,
-                        category: "NBA".to_string(),
-                        market: Some(market.clone()),
-                    };
-
-                    events.push(event);
-                    markets.push(market);
-                }
+    /// Send a request to the Polymarket US API, signing it (Ed25519) when
+    /// `signed_path` is set. Retries only on HTTP 429 - per
+    /// docs.polymarket.us/api-reference/rate-limits, stop immediately, wait
+    /// at least 1 second, then retry with exponential backoff (1s/2s/4s, 3
+    /// attempts total). A 429 means the request was rejected before
+    /// reaching the matching engine, so retrying an order submission on a
+    /// 429 cannot cause a duplicate order - unlike a transport-level
+    /// failure (timeout/reset), which is never retried here for the same
+    /// reason `clients/kalshi.rs::post()` never retries those blindly. The
+    /// timestamp and signature are regenerated on every attempt.
+    async fn request_json(
+        &self,
+        method: Method,
+        url: &str,
+        signed_path: Option<&str>,
+        body: Option<&Value>,
+    ) -> Result<Value> {
+        let mut attempt = 0u32;
+        loop {
+            let mut builder = self.http.request(method.clone(), url);
+            if let Some(path) = signed_path {
+                let headers =
+                    polymarket_auth::sign_request(&self.key_id, &self.secret_key, method.as_str(), path)?;
+                builder = builder
+                    .header("X-PM-Access-Key", headers.access_key)
+                    .header("X-PM-Timestamp", headers.timestamp)
+                    .header("X-PM-Signature", headers.signature);
             }
+            builder = builder.header("Content-Type", "application/json");
+            if let Some(body) = body {
+                builder = builder.json(body);
+            }
+
+            let response = builder
+                .send()
+                .await
+                .context("Failed to reach Polymarket US")?;
+            let status = response.status();
+
+            if status.as_u16() == 429 {
+                if attempt + 1 >= RATE_LIMIT_MAX_RETRIES {
+                    anyhow::bail!(
+                        "Polymarket US is rate limiting this IP. Retry after the temporary restriction expires."
+                    );
+                }
+                let delay = Duration::from_secs(2u64.pow(attempt));
+                warn!(
+                    "Polymarket US rate limit hit for {} {}, retrying in {:?} (attempt {}/{})",
+                    method,
+                    url,
+                    delay,
+                    attempt + 1,
+                    RATE_LIMIT_MAX_RETRIES
+                );
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+                continue;
+            }
+
+            let text = response.text().await.unwrap_or_default();
+            if !status.is_success() {
+                anyhow::bail!(concise_api_error(status, &text));
+            }
+            if text.trim().is_empty() {
+                return Ok(json!({}));
+            }
+            return serde_json::from_str(&text)
+                .with_context(|| format!("Failed to parse Polymarket US response: {}", text));
+        }
+    }
+
+    /// Get account balance from the Polymarket US API, cached briefly to
+    /// keep repeated balance checks from adding rate-limit pressure.
+    pub async fn get_balance(&self) -> Result<f64> {
+        let mut cache = self.balance_cache.lock().await;
+        if let Some((cached_at, balance)) = cache.as_ref() {
+            if cached_at.elapsed() < BALANCE_CACHE_TTL {
+                return Ok(*balance);
+            }
+        }
+
+        let url = format!("{}/v1/account/balances", self.config.api_base_url);
+        let response = self
+            .request_json(Method::GET, &url, Some("/v1/account/balances"), None)
+            .await
+            .context("Failed to fetch Polymarket US balances")?;
+        let balances = response
+            .get("balances")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Polymarket US balances response did not contain a balance list")
+            })?;
+        let total: f64 = balances
+            .iter()
+            .filter_map(|balance| amount_as_f64(&balance["buyingPower"]))
+            .sum();
+
+        *cache = Some((Instant::now(), total));
+        Ok(total)
+    }
+
+    /// Get all supported NBA and tennis match-winner events and markets.
+    pub async fn get_supported_events_and_markets(
+        &self,
+    ) -> Result<(Vec<PolymarketEvent>, Vec<PolymarketMarket>)> {
+        let sports = self.get_sports().await?;
+        let mut events = Vec::new();
+        let mut markets = Vec::new();
+        let mut fetched_series = HashSet::new();
+
+        let nba_sport = sports
+            .iter()
+            .find(|sport| {
+                let name = sport_code(sport).unwrap_or_default().to_ascii_uppercase();
+                name.contains("NBA") && !name.contains("WNBA")
+            })
+            .ok_or_else(|| anyhow::anyhow!("NBA league not found"))?;
+        let nba_series =
+            sport_series_id(nba_sport).ok_or_else(|| anyhow::anyhow!("NBA series_id not found"))?;
+        self.append_series_events_and_markets(
+            &nba_series,
+            "NBA",
+            &mut fetched_series,
+            &mut events,
+            &mut markets,
+        )
+        .await?;
+
+        for sport_code_name in TENNIS_SPORT_CODES {
+            let Some(sport) = sports
+                .iter()
+                .find(|sport| sport_has_code(sport, sport_code_name))
+            else {
+                warn!(
+                    "Polymarket US tennis sport code {} is unavailable; skipping it",
+                    sport_code_name
+                );
+                continue;
+            };
+
+            let Some(series_id) = sport_series_id(sport) else {
+                warn!(
+                    "Polymarket US tennis sport code {} has no series ID; skipping it",
+                    sport_code_name
+                );
+                continue;
+            };
+
+            self.append_series_events_and_markets(
+                &series_id,
+                "TENNIS",
+                &mut fetched_series,
+                &mut events,
+                &mut markets,
+            )
+            .await?;
         }
 
         info!(
-            "✅ Polymarket: {} 个事件, {} 个市场",
+            "✅ Polymarket supported sports: {} events, {} markets",
             events.len(),
             markets.len()
         );
@@ -409,723 +340,824 @@ impl PolymarketClient {
         Ok((events, markets))
     }
 
-    // ========================================================================
-    // ORDER PLACEMENT API (via Python service)
-    // ========================================================================
-
-    /// Market buy - buy tokens worth a specific USDC amount
-    ///
-    /// # Arguments
-    /// * `token_id` - The token/asset ID to buy
-    /// * `usdc_amount` - Amount of USDC to spend
-    pub async fn market_buy(&self, token_id: &str, usdc_amount: f64) -> Result<Value> {
-        let token_short = &token_id[..20.min(token_id.len())];
-        info!("════════════════════════════════════════════════════════════");
-        info!("🎯 [市价买入] token={}..., usdc_amount={:.4}", token_short, usdc_amount);
-        
-        // 从本地订单簿缓存获取价格并计算滑点
-        let price = if let Some(book) = self.get_orderbook(token_id) {
-            if let Some((best_ask, _)) = book.best_ask() {
-                let price_with_slippage = (best_ask + 0.02).min(0.99);
-                info!("   📊 使用本地订单簿: best_ask={:.4}, 下单价={:.4} (+0.02滑点)", best_ask, price_with_slippage);
-                Some(price_with_slippage)
-            } else {
-                warn!("   ⚠️ 本地订单簿无卖单，Python将从API获取");
-                None
-            }
-        } else {
-            warn!("   ⚠️ 本地订单簿不存在，Python将从API获取");
-            None
-        };
-        
-        info!("════════════════════════════════════════════════════════════");
-
-        let url = format!("{}/order/market", self.config.order_service_url);
-        let request = MarketOrderRequest {
-            token_id: token_id.to_string(),
-            side: "buy".to_string(),
-            amount: usdc_amount,
-            price,  // 传递Rust计算的价格
-            order_type: Some("FAK".to_string()),
-        };
-
-        let resp = self.http.post(&url)
-            .json(&request)
-            .send()
-            .await
-            .context("调用 Python 下单服务失败")?;
-
-        let response: OrderResponse = resp.json().await?;
-
-        if response.success {
-            info!("   ✅ 市价买入成功! order_id={:?}", response.order_id);
-            info!("════════════════════════════════════════════════════════════");
-            Ok(response.data.unwrap_or(json!({"success": true, "order_id": response.order_id})))
-        } else {
-            let error = response.error.unwrap_or_else(|| "Unknown error".to_string());
-            error!("   ❌ 市价买入失败: {}", error);
-            info!("════════════════════════════════════════════════════════════");
-            anyhow::bail!("市价买入失败: {}", error)
-        }
-    }
-
-    /// Market sell - sell a specific number of tokens
-    ///
-    /// # Arguments
-    /// * `token_id` - The token/asset ID to sell
-    /// * `tokens` - Number of tokens to sell
-    pub async fn market_sell(&self, token_id: &str, tokens: f64) -> Result<Value> {
-        let token_short = &token_id[..20.min(token_id.len())];
-        info!("════════════════════════════════════════════════════════════");
-        info!("🎯 [市价卖出] token={}..., tokens={:.4}", token_short, tokens);
-        
-        // 从本地订单簿缓存获取价格并计算滑点
-        let price = if let Some(book) = self.get_orderbook(token_id) {
-            if let Some((best_bid, _)) = book.best_bid() {
-                let price_with_slippage = (best_bid - 0.02).max(0.01);
-                info!("   📊 使用本地订单簿: best_bid={:.4}, 下单价={:.4} (-0.02滑点)", best_bid, price_with_slippage);
-                Some(price_with_slippage)
-            } else {
-                warn!("   ⚠️ 本地订单簿无买单，Python将从API获取");
-                None
-            }
-        } else {
-            warn!("   ⚠️ 本地订单簿不存在，Python将从API获取");
-            None
-        };
-        
-        info!("════════════════════════════════════════════════════════════");
-
-        let url = format!("{}/order/market", self.config.order_service_url);
-        let request = MarketOrderRequest {
-            token_id: token_id.to_string(),
-            side: "sell".to_string(),
-            amount: tokens,
-            price,  // 传递Rust计算的价格
-            order_type: Some("FAK".to_string()),
-        };
-
-        let resp = self.http.post(&url)
-            .json(&request)
-            .send()
-            .await
-            .context("调用 Python 下单服务失败")?;
-
-        let response: OrderResponse = resp.json().await?;
-
-        if response.success {
-            info!("   ✅ 市价卖出成功! order_id={:?}", response.order_id);
-            info!("════════════════════════════════════════════════════════════");
-            Ok(response.data.unwrap_or(json!({"success": true, "order_id": response.order_id})))
-        } else {
-            let error = response.error.unwrap_or_else(|| "Unknown error".to_string());
-            error!("   ❌ 市价卖出失败: {}", error);
-            info!("════════════════════════════════════════════════════════════");
-            anyhow::bail!("市价卖出失败: {}", error)
-        }
-    }
-
-    /// Limit buy - place a limit buy order at a specific price
-    ///
-    /// # Arguments
-    /// * `token_id` - The token/asset ID to buy
-    /// * `price` - Price per token (0.0 to 1.0)
-    /// * `size` - Number of tokens to buy
-    pub async fn limit_buy(&self, token_id: &str, price: f64, size: f64) -> Result<Value> {
-        let token_short = &token_id[..20.min(token_id.len())];
-        info!("════════════════════════════════════════════════════════════");
-        info!("🎯 [限价买入] token={}..., price={:.4}, size={:.4}", token_short, price, size);
-        info!("════════════════════════════════════════════════════════════");
-
-        let url = format!("{}/order/limit", self.config.order_service_url);
-        let request = LimitOrderRequest {
-            token_id: token_id.to_string(),
-            side: "buy".to_string(),
-            price,
-            size,
-            order_type: Some("GTC".to_string()),
-        };
-
-        let resp = self.http.post(&url)
-            .json(&request)
-            .send()
-            .await
-            .context("调用 Python 下单服务失败")?;
-
-        let response: OrderResponse = resp.json().await?;
-
-        if response.success {
-            info!("   ✅ 限价买入订单已提交! order_id={:?}", response.order_id);
-            info!("════════════════════════════════════════════════════════════");
-            Ok(response.data.unwrap_or(json!({"success": true, "order_id": response.order_id})))
-        } else {
-            let error = response.error.unwrap_or_else(|| "Unknown error".to_string());
-            error!("   ❌ 限价买入失败: {}", error);
-            info!("════════════════════════════════════════════════════════════");
-            anyhow::bail!("限价买入失败: {}", error)
-        }
-    }
-
-    /// Limit sell - place a limit sell order at a specific price
-    ///
-    /// # Arguments
-    /// * `token_id` - The token/asset ID to sell
-    /// * `price` - Price per token (0.0 to 1.0)
-    /// * `size` - Number of tokens to sell
-    pub async fn limit_sell(&self, token_id: &str, price: f64, size: f64) -> Result<Value> {
-        let token_short = &token_id[..20.min(token_id.len())];
-        info!("════════════════════════════════════════════════════════════");
-        info!("🎯 [限价卖出] token={}..., price={:.4}, size={:.4}", token_short, price, size);
-        info!("════════════════════════════════════════════════════════════");
-
-        let url = format!("{}/order/limit", self.config.order_service_url);
-        let request = LimitOrderRequest {
-            token_id: token_id.to_string(),
-            side: "sell".to_string(),
-            price,
-            size,
-            order_type: Some("GTC".to_string()),
-        };
-
-        let resp = self.http.post(&url)
-            .json(&request)
-            .send()
-            .await
-            .context("调用 Python 下单服务失败")?;
-
-        let response: OrderResponse = resp.json().await?;
-
-        if response.success {
-            info!("   ✅ 限价卖出订单已提交! order_id={:?}", response.order_id);
-            info!("════════════════════════════════════════════════════════════");
-            Ok(response.data.unwrap_or(json!({"success": true, "order_id": response.order_id})))
-        } else {
-            let error = response.error.unwrap_or_else(|| "Unknown error".to_string());
-            error!("   ❌ 限价卖出失败: {}", error);
-            info!("════════════════════════════════════════════════════════════");
-            anyhow::bail!("限价卖出失败: {}", error)
-        }
-    }
-
-    // ========================================================================
-    // LEGACY ORDER PLACEMENT METHODS (kept for backward compatibility)
-    // ========================================================================
-
-    /// Place a market order by specifying tokens quantity (LEGACY)
-    ///
-    /// Note: Consider using `market_buy` or `market_sell` instead.
-    pub async fn place_market_order_by_tokens(
+    /// Fetch only the legacy NBA feed for callers that do not use the
+    /// supported-sports scan.
+    #[allow(dead_code)]
+    pub async fn get_nba_events_and_markets(
         &self,
-        token_id: &str,
-        side: &str,
-        tokens: f64,
-    ) -> Result<Value> {
-        // Route to the appropriate high-level method
-        if side.to_lowercase() == "buy" {
-            // For BUY with tokens, estimate USDC amount using local orderbook cache
-            let orderbook = self.get_orderbook(token_id);
-            let mut total_usdc = 0.0;
-            let mut remaining = tokens;
-            
-            if let Some(book) = orderbook {
-                // Estimate USDC needed (asks are sorted high to low, best ask at last)
-                for (price, size) in book.asks.iter().rev() {
-                    let fill = (*size).min(remaining);
-                    total_usdc += fill * price;
-                    remaining -= fill;
-                    if remaining <= 0.0 {
-                        break;
-                    }
-                }
-            }
-            
-            // If no orderbook, estimate with 0.5 price
-            if total_usdc == 0.0 {
-                total_usdc = tokens * 0.5;
-            }
-            
-            // 不要将滑点加到下单金额上！
-            // 滑点应该只影响最高接受价格，由 market_buy 中的 price_with_slippage 处理
-            // 下单金额保持为实际需要的 USDC 数量
-            info!("   💰 预计花费: {:.4} USDC 买入 {:.2} tokens", total_usdc, tokens);
-            self.market_buy(token_id, total_usdc).await
-        } else {
-            self.market_sell(token_id, tokens).await
-        }
+    ) -> Result<(Vec<PolymarketEvent>, Vec<PolymarketMarket>)> {
+        let sports = self.get_sports().await?;
+        let nba_sport = sports
+            .iter()
+            .find(|sport| {
+                let name = sport_code(sport).unwrap_or_default().to_ascii_uppercase();
+                name.contains("NBA") && !name.contains("WNBA")
+            })
+            .ok_or_else(|| anyhow::anyhow!("NBA league not found"))?;
+        let nba_series =
+            sport_series_id(nba_sport).ok_or_else(|| anyhow::anyhow!("NBA series_id not found"))?;
+        self.get_series_events_and_markets(&nba_series, "NBA").await
     }
 
-    /// Place a market order (legacy method - uses USDC amount for BUY, tokens for SELL)
-    ///
-    /// Note: Consider using `market_buy` or `market_sell` instead.
-    pub async fn place_market_order(
+    async fn get_sports(&self) -> Result<Vec<Value>> {
+        let sports_url = format!("{}/v1/sports", self.config.base_url);
+        let response = self.http.get(&sports_url).send().await?;
+        if !response.status().is_success() {
+            anyhow::bail!("Failed to get sports leagues: {}", response.status());
+        }
+
+        response
+            .json::<Value>()
+            .await?
+            .get("sports")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Polymarket US sports response is missing sports"))
+    }
+
+    async fn append_series_events_and_markets(
         &self,
-        token_id: &str,
-        side: &str,
-        amount: f64,
-    ) -> Result<Value> {
-        // Route to the appropriate high-level method
-        if side.to_lowercase() == "buy" {
-            self.market_buy(token_id, amount).await
-        } else {
-            self.market_sell(token_id, amount).await
-        }
-    }
-
-    /// Get open orders via Python service
-    pub async fn get_open_orders(&self) -> Result<Value> {
-        let url = format!("{}/orders", self.config.order_service_url);
-        let resp = self.http.get(&url)
-            .send()
-            .await
-            .context("调用 Python 下单服务失败")?;
-
-        if !resp.status().is_success() {
-            anyhow::bail!("获取订单失败: HTTP {}", resp.status());
-        }
-
-        let data: Value = resp.json().await?;
-        if data.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
-            Ok(data.get("orders").cloned().unwrap_or(json!([])))
-        } else {
-            let error = data.get("error").and_then(|v| v.as_str()).unwrap_or("Unknown error");
-            anyhow::bail!("获取订单失败: {}", error)
-        }
-    }
-
-    /// Get positions (placeholder - returns empty for now)
-    pub async fn get_positions(&self) -> Result<Value> {
-        // TODO: Implement via Python service if needed
-        info!("⚠️ [Polymarket] get_positions 暂未实现，返回空持仓");
-        Ok(json!([]))
-    }
-
-    /// Cancel an order via Python service
-    pub async fn cancel_order(&self, order_id: &str) -> Result<Value> {
-        let url = format!("{}/order/cancel", self.config.order_service_url);
-        let request = CancelOrderRequest {
-            order_id: order_id.to_string(),
-        };
-
-        let resp = self.http.post(&url)
-            .json(&request)
-            .send()
-            .await
-            .context("调用 Python 下单服务失败")?;
-
-        let response: OrderResponse = resp.json().await?;
-
-        if response.success {
-            Ok(json!({"success": true, "order_id": order_id}))
-        } else {
-            let error = response.error.unwrap_or_else(|| "Unknown error".to_string());
-            anyhow::bail!("取消订单失败: {}", error)
-        }
-    }
-
-    /// Subscribe to additional tokens dynamically (hot subscription)
-    ///
-    /// This can be called after the WebSocket connection is established
-    /// to add new token subscriptions.
-    pub async fn subscribe_tokens(&self, token_ids: Vec<String>) -> Result<bool> {
-        if token_ids.is_empty() {
-            return Ok(true);
-        }
-
-        let tx = self.command_tx.read().clone();
-        if let Some(tx) = tx {
-            match tx.send(PolyWsCommand::Subscribe(token_ids.clone())).await {
-                Ok(_) => {
-                    info!("🔌 [Polymarket] 发送热订阅请求: {} 个 token", token_ids.len());
-                    Ok(true)
-                }
-                Err(e) => {
-                    warn!("⚠️ [Polymarket] 热订阅请求发送失败: {}", e);
-                    Ok(false)
-                }
-            }
-        } else {
-            warn!("⚠️ [Polymarket] WebSocket 未连接，无法热订阅");
-            Ok(false)
-        }
-    }
-
-    /// Unsubscribe from tokens dynamically
-    ///
-    /// This can be called after the WebSocket connection is established
-    /// to remove token subscriptions for ended games.
-    /// Uses the operation: "unsubscribe" field as per Polymarket API.
-    pub async fn unsubscribe_tokens(&self, token_ids: Vec<String>) -> Result<bool> {
-        if token_ids.is_empty() {
-            return Ok(true);
-        }
-
-        let tx = self.command_tx.read().clone();
-        if let Some(tx) = tx {
-            match tx.send(PolyWsCommand::Unsubscribe(token_ids.clone())).await {
-                Ok(_) => {
-                    info!("🔌 [Polymarket] 发送取消订阅请求: {} 个 token", token_ids.len());
-                    Ok(true)
-                }
-                Err(e) => {
-                    warn!("⚠️ [Polymarket] 取消订阅请求发送失败: {}", e);
-                    Ok(false)
-                }
-            }
-        } else {
-            warn!("⚠️ [Polymarket] WebSocket 未连接，无法取消订阅");
-            Ok(false)
-        }
-    }
-
-    /// Connect to WebSocket for real-time price updates
-    pub async fn connect_websocket(
-        &self,
-        token_ids: Vec<String>,
-        price_tx: mpsc::Sender<PriceUpdate>,
+        series_id: &str,
+        category: &str,
+        fetched_series: &mut HashSet<String>,
+        events: &mut Vec<PolymarketEvent>,
+        markets: &mut Vec<PolymarketMarket>,
     ) -> Result<()> {
-        info!("正在连接 Polymarket WebSocket...");
-
-        let (ws_stream, _) = connect_async(POLY_WS_URL)
-            .await
-            .with_context(|| "连接 Polymarket WebSocket 失败")?;
-
-        let (mut write, mut read) = ws_stream.split();
-
-        // Create channel for dynamic subscriptions/unsubscriptions
-        let (cmd_tx, mut cmd_rx) = mpsc::channel::<PolyWsCommand>(100);
-        *self.command_tx.write() = Some(cmd_tx);
-
-        // Subscribe to initial markets - 使用正确的格式（与 Python 版本一致）
-        let subscribe_msg = json!({
-            "assets_ids": token_ids,
-            "type": "market"
-        });
-
-        write
-            .send(Message::Text(subscribe_msg.to_string()))
-            .await?;
-
-        info!("已订阅 {} 个 Polymarket 代币", token_ids.len());
-
-        let orderbook_cache = self.orderbook_cache.clone();
-
-        // Process messages with dynamic subscription/unsubscription support
-        loop {
-            tokio::select! {
-                // Handle incoming WebSocket messages
-                msg = read.next() => {
-                    match msg {
-                        Some(Ok(Message::Text(text))) => {
-                            // Parse message and update orderbook cache
-                            let updates = Self::parse_ws_message(&text, &orderbook_cache);
-                            for update in updates {
-                                if price_tx.send(update).await.is_err() {
-                                    warn!("价格更新通道已关闭");
-                                    break;
-                                }
-                            }
-                        }
-                        Some(Ok(Message::Close(_))) => {
-                            info!("Polymarket WebSocket 已关闭");
-                            break;
-                        }
-                        Some(Err(e)) => {
-                            error!("Polymarket WebSocket 错误: {}", e);
-                            break;
-                        }
-                        None => {
-                            info!("Polymarket WebSocket 流结束");
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-                // Handle dynamic subscription/unsubscription requests
-                Some(command) = cmd_rx.recv() => {
-                    match command {
-                        PolyWsCommand::Subscribe(new_tokens) => {
-                            info!("🔌 [Polymarket] 处理热订阅: {} 个新 token", new_tokens.len());
-                            let subscribe_msg = json!({
-                                "assets_ids": new_tokens,
-                                "type": "market",
-                                "operation": "subscribe"
-                            });
-
-                            if let Err(e) = write.send(Message::Text(subscribe_msg.to_string())).await {
-                                error!("❌ [Polymarket] 热订阅发送失败: {}", e);
-                            } else {
-                                info!("✅ [Polymarket] 热订阅完成: {} 个 token", new_tokens.len());
-                            }
-                        }
-                        PolyWsCommand::Unsubscribe(tokens_to_unsub) => {
-                            info!("🔌 [Polymarket] 处理取消订阅: {} 个 token", tokens_to_unsub.len());
-                            // Use the operation: "unsubscribe" field as per Polymarket API
-                            let unsubscribe_msg = json!({
-                                "assets_ids": tokens_to_unsub,
-                                "type": "market",
-                                "operation": "unsubscribe"
-                            });
-
-                            if let Err(e) = write.send(Message::Text(unsubscribe_msg.to_string())).await {
-                                error!("❌ [Polymarket] 取消订阅发送失败: {}", e);
-                            } else {
-                                // Also remove from orderbook cache
-                                let mut cache = orderbook_cache.write();
-                                for token in &tokens_to_unsub {
-                                    cache.remove(token);
-                                }
-                                info!("✅ [Polymarket] 取消订阅完成: {} 个 token", tokens_to_unsub.len());
-                            }
-                        }
-                    }
-                }
-            }
+        if !fetched_series.insert(series_id.to_string()) {
+            return Ok(());
         }
 
-        // Clear command channel on disconnect
-        *self.command_tx.write() = None;
-
+        let (mut series_events, mut series_markets) = self
+            .get_series_events_and_markets(series_id, category)
+            .await?;
+        events.append(&mut series_events);
+        markets.append(&mut series_markets);
         Ok(())
     }
 
-    /// Parse WebSocket message and update orderbook cache
-    /// 
-    /// Supports two message formats (matching Python implementation):
-    /// 1. `book` (initial orderbook snapshot): { "event_type": "book", "asset_id": "...", "bids": [...], "asks": [...] }
-    /// 2. `price_change` (real-time updates): { "event_type": "price_change", "price_changes": [{ "asset_id": "...", "price": "...", "size": "...", "side": "..." }, ...] }
-    /// 
-    /// Returns a Vec because price_change messages can contain multiple asset updates.
-    fn parse_ws_message(
-        text: &str,
-        orderbook_cache: &Arc<RwLock<HashMap<String, PolyOrderBook>>>,
-    ) -> Vec<PriceUpdate> {
-        let mut updates = Vec::new();
-        
-        // Parse JSON - handle both single object and array format
-        let raw_data: Value = match serde_json::from_str(text) {
-            Ok(v) => v,
-            Err(_) => return updates,
-        };
-        
-        // Handle array format (WebSocket may return [{...}] instead of {...})
-        let items: Vec<Value> = if raw_data.is_array() {
-            raw_data.as_array().unwrap().clone()
-        } else {
-            vec![raw_data]
-        };
-        
-        for data in items {
-            if let Some(parsed) = Self::parse_single_message(&data, orderbook_cache) {
-                updates.extend(parsed);
-            }
+    async fn get_series_events_and_markets(
+        &self,
+        series_id: &str,
+        category: &str,
+    ) -> Result<(Vec<PolymarketEvent>, Vec<PolymarketMarket>)> {
+        let events_url = format!(
+            "{}/v1/events?seriesId={}&active=true&closed=false&limit=100",
+            self.config.base_url, series_id
+        );
+        let response = self.http.get(&events_url).send().await?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "Failed to get Polymarket {} events: {}",
+                category,
+                response.status()
+            );
         }
-        
-        updates
-    }
-    
-    /// Parse a single message object
-    fn parse_single_message(
-        data: &Value,
-        orderbook_cache: &Arc<RwLock<HashMap<String, PolyOrderBook>>>,
-    ) -> Option<Vec<PriceUpdate>> {
-        let event_type = data.get("event_type").and_then(|v| v.as_str())?;
-        
-        match event_type {
-            "book" => Self::parse_book_message(data, orderbook_cache),
-            "price_change" => Self::parse_price_change_message(data, orderbook_cache),
-            "connected" => None, // Ignore connection confirmation messages
-            _ => None,
-        }
-    }
-    
-    /// Parse book message (initial orderbook snapshot)
-    /// 
-    /// Format: { "event_type": "book", "asset_id": "...", "bids": [...], "asks": [...] }
-    /// - bids: sorted ascending by price, best bid (highest) is last
-    /// - asks: sorted descending by price, best ask (lowest) is last
-    fn parse_book_message(
-        data: &Value,
-        orderbook_cache: &Arc<RwLock<HashMap<String, PolyOrderBook>>>,
-    ) -> Option<Vec<PriceUpdate>> {
-        let asset_id = data.get("asset_id").and_then(|v| v.as_str())?.to_string();
-        let bids = data.get("bids").and_then(|v| v.as_array())?;
-        let asks = data.get("asks").and_then(|v| v.as_array())?;
-        
-        // Build orderbook from snapshot
-        let mut book = PolyOrderBook::default();
-        
-        for entry in bids {
-            if let Some((price, size)) = Self::extract_price_size_from_entry(entry) {
-                book.bids.push((price, size));
-            }
-        }
-        
-        for entry in asks {
-            if let Some((price, size)) = Self::extract_price_size_from_entry(entry) {
-                book.asks.push((price, size));
-            }
-        }
-        
-        // Sort: bids ascending by price, asks descending by price
-        book.bids.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        book.asks.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        
-        // Get best prices for PriceUpdate
-        let yes_bid = book.best_bid().map(|(p, _)| p);
-        let yes_ask = book.best_ask().map(|(p, _)| p);
-        
-        // Store in cache
-        orderbook_cache.write().insert(asset_id.clone(), book);
-        
-        Some(vec![PriceUpdate {
-            platform: Platform::Polymarket,
-            market_id: asset_id,
-            yes_bid,
-            yes_ask,
-            no_bid: None,
-            no_ask: None,
-            timestamp: Utc::now(),
-        }])
-    }
-    
-    /// Parse price_change message (real-time price updates)
-    /// 
-    /// Format: { "event_type": "price_change", "price_changes": [{ "asset_id": "...", "price": "...", "size": "...", "side": "BUY"|"SELL", "best_bid": "...", "best_ask": "..." }, ...] }
-    fn parse_price_change_message(
-        data: &Value,
-        orderbook_cache: &Arc<RwLock<HashMap<String, PolyOrderBook>>>,
-    ) -> Option<Vec<PriceUpdate>> {
-        let price_changes = data.get("price_changes").and_then(|v| v.as_array())?;
-        let mut updates = Vec::new();
-        
-        for change in price_changes {
-            let asset_id = match change.get("asset_id").and_then(|v| v.as_str()) {
-                Some(id) => id.to_string(),
-                None => continue,
-            };
-            
-            // Update orderbook cache with price/size/side delta
-            let delta_price = change.get("price").and_then(|v| Self::parse_string_or_number(v));
-            let delta_size = change.get("size").and_then(|v| Self::parse_string_or_number(v));
-            let delta_side = change.get("side").and_then(|v| v.as_str());
-            
-            if let (Some(price), Some(size), Some(side)) = (delta_price, delta_size, delta_side) {
-                let mut cache = orderbook_cache.write();
-                let book = cache.entry(asset_id.clone()).or_insert_with(PolyOrderBook::default);
-                
-                let book_side = if side.to_uppercase() == "BUY" {
-                    &mut book.bids
-                } else {
-                    &mut book.asks
+
+        let api_events: Vec<Value> = response
+            .json::<Value>()
+            .await?
+            .get("events")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Polymarket US events response is missing events"))?;
+        debug!(
+            "📥 Retrieved {} Polymarket {} events",
+            api_events.len(),
+            category
+        );
+
+        let mut events = Vec::new();
+        let mut markets = Vec::new();
+        for api_event in &api_events {
+            let event_title = api_event["title"].as_str().unwrap_or("");
+            let event_date = extract_date_from_slug(api_event["slug"].as_str().unwrap_or(""));
+
+            for market_data in api_event["markets"].as_array().into_iter().flatten() {
+                let parsed = match category {
+                    "NBA" => parse_nba_market(event_title, event_date, market_data),
+                    "TENNIS" => parse_tennis_match_winner_market(event_date, market_data),
+                    _ => None,
                 };
-                
-                // Find existing price level and update or insert
-                if let Some(pos) = book_side.iter().position(|(p, _)| (*p - price).abs() < 0.0001) {
-                    if size <= 0.0 {
-                        // Remove level if size is 0
-                        book_side.remove(pos);
-                    } else {
-                        // Update size
-                        book_side[pos].1 = size;
-                    }
-                } else if size > 0.0 {
-                    // Insert new level
-                    book_side.push((price, size));
-                    // Re-sort: bids ascending, asks descending
-                    if side.to_uppercase() == "BUY" {
-                        book_side.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-                    } else {
-                        book_side.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                    }
+                if let Some((event, market)) = parsed {
+                    events.push(event);
+                    markets.push(market);
                 }
             }
-            
-            // Parse best_bid/best_ask for PriceUpdate (fallback to cache if not provided)
-            let raw_best_bid = change.get("best_bid");
-            let raw_best_ask = change.get("best_ask");
-            let parsed_bid = raw_best_bid.and_then(|v| Self::parse_string_or_number(v));
-            let parsed_ask = raw_best_ask.and_then(|v| Self::parse_string_or_number(v));
-            
-            // 重要修复: 始终从本地订单簿缓存获取 best_ask
-            // Polymarket 的 price_change 消息中的 best_ask 字段不可信（可能是过时的）
-            // 我们自己维护的订单簿是通过 delta 更新的，更准确
-            let cache_bid_final = orderbook_cache.read().get(&asset_id).and_then(|b| b.best_bid()).map(|(p, _)| p);
-            let cache_ask_final = orderbook_cache.read().get(&asset_id).and_then(|b| b.best_ask()).map(|(p, _)| p);
-            
-            let yes_bid = cache_bid_final.or(parsed_bid);
-            let yes_ask = cache_ask_final.or(parsed_ask);
-            
-            updates.push(PriceUpdate {
-                platform: Platform::Polymarket,
-                market_id: asset_id,
-                yes_bid,
-                yes_ask,
-                no_bid: None,
-                no_ask: None,
-                timestamp: Utc::now(),
-            });
         }
-        
-        if updates.is_empty() {
-            None
-        } else {
-            Some(updates)
-        }
-    }
-    
-    /// Parse a value that can be string or number
-    fn parse_string_or_number(v: &Value) -> Option<f64> {
-        if v.is_null() {
-            None
-        } else if let Some(s) = v.as_str() {
-            if s.is_empty() { None } else { s.parse().ok() }
-        } else {
-            v.as_f64()
-        }
-    }
-    
-    /// Extract price from an orderbook entry
-    /// 
-    /// Entry can be either:
-    /// - Object: { "price": "0.50", "size": "100" }
-    /// - Array: [0.50, 100] (price, size)
-    #[allow(dead_code)]
-    fn extract_price_from_entry(entry: &Value) -> Option<f64> {
-        if let Some(obj) = entry.as_object() {
-            // Object format: { "price": "0.50", ... }
-            obj.get("price").and_then(|p| {
-                p.as_str().and_then(|s| s.parse().ok()).or(p.as_f64())
-            })
-        } else if let Some(arr) = entry.as_array() {
-            // Array format: [price, size]
-            arr.first().and_then(|p| {
-                p.as_str().and_then(|s| s.parse().ok()).or(p.as_f64())
-            })
-        } else {
-            None
-        }
+
+        Ok((events, markets))
     }
 
-    /// Extract price and size from an orderbook entry
-    /// 
-    /// Entry can be either:
-    /// - Object: { "price": "0.50", "size": "100" }
-    /// - Array: [price, size]
-    fn extract_price_size_from_entry(entry: &Value) -> Option<(f64, f64)> {
-        if let Some(obj) = entry.as_object() {
-            // Object format: { "price": "0.50", "size": "100" }
-            let price = obj.get("price").and_then(|p| Self::parse_string_or_number(p))?;
-            let size = obj.get("size").and_then(|s| Self::parse_string_or_number(s))?;
-            Some((price, size))
-        } else if let Some(arr) = entry.as_array() {
-            // Array format: [price, size]
-            let price = arr.first().and_then(|p| Self::parse_string_or_number(p))?;
-            let size = arr.get(1).and_then(|s| Self::parse_string_or_number(s))?;
-            Some((price, size))
-        } else {
-            None
+    // ========================================================================
+    // ORDER PLACEMENT API (direct, Ed25519-signed against api.polymarket.us)
+    // ========================================================================
+
+    /// Place an immediate-or-cancel Polymarket US limit order for whole contracts.
+    pub async fn place_limit_order(
+        &self,
+        market_slug: &str,
+        position_side: PolymarketPositionSide,
+        side: &str,
+        contracts: i32,
+        price: f64,
+    ) -> Result<Value> {
+        let response = self
+            .submit_limit_order(market_slug, position_side, side, contracts, price)
+            .await?;
+        if response.filled_contracts <= 0 {
+            anyhow::bail!(
+                "Polymarket US limit order did not fill: {}",
+                response
+                    .error
+                    .unwrap_or_else(|| "Unknown error".to_string())
+            );
         }
+        Ok(json!({
+            "success": true,
+            "order_id": response.order_id,
+            "status": response.status,
+            "filled_contracts": response.filled_contracts,
+            "latency_ms": response.latency_ms,
+        }))
     }
+
+    /// Submit a FAK order and retain explicit acceptance/fill information for
+    /// paired-execution recovery. Transport failures remain errors; exchange
+    /// rejections and zero fills are returned for durable recording.
+    pub async fn submit_limit_order(
+        &self,
+        market_slug: &str,
+        position_side: PolymarketPositionSide,
+        side: &str,
+        contracts: i32,
+        price: f64,
+    ) -> Result<PolymarketOrderResult> {
+        let side = side.to_ascii_lowercase();
+        if market_slug.trim().is_empty()
+            || contracts <= 0
+            || !price.is_finite()
+            || !(0.0..1.0).contains(&price)
+            || !matches!(side.as_str(), "buy" | "sell")
+        {
+            anyhow::bail!("Polymarket US limit order requires a slug, positive whole contract count, limit price, and buy or sell action");
+        }
+
+        // `quantity` is a JSON integer here because `contracts` is already
+        // `i32` - the SDK's own type stubs declare `quantity: int`, and a
+        // prior bug sent a JSON float (`5.0`) through the old Python hop,
+        // which this path can no longer reproduce.
+        let intent = format!(
+            "ORDER_INTENT_{}_{}",
+            side.to_ascii_uppercase(),
+            position_side.as_str().to_ascii_uppercase()
+        );
+        let body = json!({
+            "marketSlug": market_slug,
+            "intent": intent,
+            "type": "ORDER_TYPE_LIMIT",
+            "price": {"value": price.to_string(), "currency": "USD"},
+            "quantity": contracts,
+            "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+            "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC",
+            "synchronousExecution": true,
+            "maxBlockTime": "5",
+        });
+
+        let started = Instant::now();
+        let url = format!("{}/v1/orders", self.config.api_base_url);
+        let response = self
+            .request_json(Method::POST, &url, Some("/v1/orders"), Some(&body))
+            .await
+            .context("Failed to submit Polymarket US limit order")?;
+        let latency_ms = started.elapsed().as_millis() as i64;
+
+        Ok(parse_polymarket_order_result(&response, latency_ms, &body))
+    }
+
+    /// Retrieve a fresh book directly from the Polymarket US gateway. This
+    /// must be called immediately before an automated paired order; display
+    /// quotes and cached account data are deliberately not substitutes.
+    pub async fn get_market_book(&self, market_slug: &str) -> Result<PolymarketMarketBook> {
+        if market_slug.trim().is_empty() {
+            anyhow::bail!("Polymarket US market slug cannot be empty");
+        }
+        let base = self.config.base_url.trim_end_matches('/');
+        let url = format!("{}/v1/markets/{}/book", base, market_slug);
+        let response = self
+            .request_json(Method::GET, &url, None, None)
+            .await
+            .context("Failed to retrieve Polymarket US market book")?;
+        let mut book = build_market_book(&response, market_slug)?;
+
+        // Cached after the first lookup, so this normally costs nothing
+        // extra. A failure here must not silently look like "no minimum" -
+        // leave both fields None and let the caller refuse to size an order
+        // against them.
+        match self.market_constraints(market_slug).await {
+            Ok((min_qty, tick_size)) => {
+                book.minimum_trade_qty = min_qty;
+                book.price_tick_size = tick_size;
+            }
+            Err(error) => {
+                warn!(
+                    "Polymarket US market constraint lookup failed for {}: {}",
+                    market_slug, error
+                );
+            }
+        }
+
+        Ok(book)
+    }
+
+    /// `minimumTradeQty` / `orderPriceMinTickSize` for a market, cached for
+    /// an hour (docs.polymarket.us/api-reference/orders/overview:
+    /// "constraints are market-dependent - retrieve ... before order
+    /// submission").
+    async fn market_constraints(&self, market_slug: &str) -> Result<(Option<f64>, Option<f64>)> {
+        let mut cache = self.market_constraints_cache.lock().await;
+        if let Some((cached_at, min_qty, tick_size)) = cache.get(market_slug) {
+            if cached_at.elapsed() < MARKET_CONSTRAINTS_CACHE_TTL {
+                return Ok((*min_qty, *tick_size));
+            }
+        }
+
+        let base = self.config.base_url.trim_end_matches('/');
+        let url = format!("{}/v1/market/slug/{}", base, market_slug);
+        let response = self.request_json(Method::GET, &url, None, None).await?;
+        let market = response.get("market");
+        let min_qty = market.and_then(|m| amount_as_f64(&m["minimumTradeQty"]));
+        let tick_size = market.and_then(|m| amount_as_f64(&m["orderPriceMinTickSize"]));
+
+        cache.insert(market_slug.to_string(), (Instant::now(), min_qty, tick_size));
+        Ok((min_qty, tick_size))
+    }
+
+    /// Get open orders directly from the Polymarket US API.
+    pub async fn get_open_orders(&self) -> Result<Value> {
+        let url = format!("{}/v1/orders/open", self.config.api_base_url);
+        let response = self
+            .request_json(Method::GET, &url, Some("/v1/orders/open"), None)
+            .await
+            .context("Failed to fetch Polymarket US open orders")?;
+        Ok(response.get("orders").cloned().unwrap_or_else(|| json!([])))
+    }
+
+    /// Get positions directly from the Polymarket US API, cached briefly to
+    /// keep repeated lookups from adding rate-limit pressure.
+    pub async fn get_positions(&self) -> Result<Value> {
+        let mut cache = self.positions_cache.lock().await;
+        if let Some((cached_at, positions)) = cache.as_ref() {
+            if cached_at.elapsed() < POSITIONS_CACHE_TTL {
+                return Ok(positions.clone());
+            }
+        }
+
+        let url = format!("{}/v1/portfolio/positions", self.config.api_base_url);
+        let response = self
+            .request_json(Method::GET, &url, Some("/v1/portfolio/positions"), None)
+            .await
+            .context("Failed to fetch Polymarket US positions")?;
+        let positions = normalize_positions(&response)?;
+
+        *cache = Some((Instant::now(), positions.clone()));
+        Ok(positions)
+    }
+
+    /// Cancel an order directly against the Polymarket US API. The
+    /// exchange requires the order's `marketSlug` on cancel, so this looks
+    /// the order up first.
+    pub async fn cancel_order(&self, order_id: &str) -> Result<Value> {
+        let retrieve_path = format!("/v1/order/{}", order_id);
+        let retrieve_url = format!("{}{}", self.config.api_base_url, retrieve_path);
+        let order = self
+            .request_json(Method::GET, &retrieve_url, Some(&retrieve_path), None)
+            .await
+            .context("Failed to look up Polymarket US order before cancelling")?;
+        let market_slug = order
+            .get("order")
+            .and_then(|order| order.get("marketSlug"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Polymarket US did not return a marketSlug for this order")
+            })?;
+
+        let cancel_path = format!("/v1/order/{}/cancel", order_id);
+        let cancel_url = format!("{}{}", self.config.api_base_url, cancel_path);
+        self.request_json(
+            Method::POST,
+            &cancel_url,
+            Some(&cancel_path),
+            Some(&json!({ "marketSlug": market_slug })),
+        )
+        .await
+        .context("Failed to cancel Polymarket US order")?;
+
+        Ok(json!({"success": true, "order_id": order_id}))
+    }
+}
+
+/// Build and validate a `PolymarketMarketBook` straight from the gateway's
+/// raw `{marketData: {...}}` envelope.
+pub fn build_market_book(response: &Value, requested_slug: &str) -> Result<PolymarketMarketBook> {
+    let market_data = response
+        .get("marketData")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            anyhow::anyhow!("Polymarket US market book did not contain a marketData envelope")
+        })?;
+    let market_slug = market_data
+        .get("marketSlug")
+        .and_then(Value::as_str)
+        .filter(|slug| *slug == requested_slug)
+        .ok_or_else(|| {
+            anyhow::anyhow!("Polymarket US market book slug did not match the requested market")
+        })?;
+    let state = market_data
+        .get("state")
+        .and_then(Value::as_str)
+        .filter(|state| !state.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Polymarket US market book did not contain a state"))?;
+
+    let mut bids = normalize_book_levels(market_data.get("bids"), "bids")?;
+    let mut offers = normalize_book_levels(market_data.get("offers"), "offers")?;
+    bids.sort_by(|a, b| b.price.total_cmp(&a.price));
+    offers.sort_by(|a, b| a.price.total_cmp(&b.price));
+
+    let transact_time = match market_data.get("transactTime") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(Value::Number(value)) => Some(value.to_string()),
+        Some(_) => anyhow::bail!("Polymarket US market book contained an invalid transactTime"),
+    };
+
+    Ok(PolymarketMarketBook {
+        success: true,
+        market_slug: market_slug.to_string(),
+        state: state.to_string(),
+        transact_time,
+        fetched_at_ms: Utc::now().timestamp_millis(),
+        bids,
+        offers,
+        minimum_trade_qty: None,
+        price_tick_size: None,
+    })
+}
+
+/// Validate SDK price/quantity objects without accepting lossy book data.
+fn normalize_book_levels(levels: Option<&Value>, field: &str) -> Result<Vec<PolymarketBookLevel>> {
+    let levels = levels
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("Polymarket US market book {} must be a list", field))?;
+
+    let mut normalized = Vec::with_capacity(levels.len());
+    for level in levels {
+        let price = amount_as_f64(&level["px"]);
+        let quantity = amount_as_f64(&level["qty"]);
+        let (Some(price), Some(quantity)) = (price, quantity) else {
+            anyhow::bail!("Polymarket US market book {} contains an invalid level", field);
+        };
+        if !(0.0 < price && price < 1.0) {
+            anyhow::bail!("Polymarket US market book {} contains an invalid price", field);
+        }
+        if quantity <= 0.0 {
+            anyhow::bail!("Polymarket US market book {} contains an invalid quantity", field);
+        }
+        normalized.push(PolymarketBookLevel { price, quantity });
+    }
+    Ok(normalized)
+}
+
+/// Convert the SDK's market-keyed position map into a frontend-safe list.
+fn normalize_positions(response: &Value) -> Result<Value> {
+    let positions = response.get("positions");
+    if let Some(Value::Array(items)) = positions {
+        return Ok(Value::Array(items.clone()));
+    }
+    let Some(Value::Object(map)) = positions else {
+        anyhow::bail!("Polymarket US positions response did not contain a position list or map");
+    };
+
+    let mut normalized = Vec::with_capacity(map.len());
+    for (market_slug, position) in map {
+        let Some(position) = position.as_object() else {
+            continue;
+        };
+        let metadata = position.get("marketMetadata").and_then(Value::as_object);
+        let title = metadata
+            .and_then(|m| m.get("title"))
+            .and_then(Value::as_str)
+            .unwrap_or(market_slug);
+        normalized.push(json!({
+            "id": market_slug,
+            "asset": market_slug,
+            "conditionId": market_slug,
+            "title": title,
+            "size": position.get("netPosition").cloned().unwrap_or_else(|| json!("0")),
+            "value": position.get("cashValue").and_then(amount_as_f64),
+            // Total cost basis; with `cashValue` it yields avg entry, mark
+            // and unrealized P&L without any extra API call.
+            "cost": position.get("cost").and_then(amount_as_f64),
+            "pnl": position.get("realized").and_then(amount_as_f64),
+            "outcome": metadata.and_then(|m| m.get("outcome")).cloned().unwrap_or(Value::Null),
+        }));
+    }
+    Ok(Value::Array(normalized))
+}
+
+/// Convert an HTTP error response into a concise message, keeping upstream
+/// HTML/JSON error pages out of application logs.
+fn concise_api_error(status: StatusCode, body_text: &str) -> String {
+    let message = serde_json::from_str::<Value>(body_text)
+        .ok()
+        .and_then(|body| {
+            body.get("message")
+                .or_else(|| body.get("error"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| body_text.to_string());
+    if message.contains("1015") || message.to_lowercase().contains("rate limited") {
+        return "Polymarket US is rate limiting this IP. Retry after the temporary restriction expires."
+            .to_string();
+    }
+    let mut truncated = message;
+    truncated.truncate(500);
+    format!("Polymarket US API error {}: {}", status, truncated)
+}
+
+/// Convert the raw `/v1/orders` execution envelope into an explicit order
+/// result. Unlike the old Python order-service hop this replaced, a non-fill
+/// logs the full outgoing request and raw
+/// response at `warn!` - previously only a fill was logged anywhere, which
+/// left rejections like `ORD_REJECT_REASON_EXCHANGE_OPTION` with no trace
+/// of what was actually sent.
+fn parse_polymarket_order_result(
+    response: &Value,
+    latency_ms: i64,
+    request_body: &Value,
+) -> PolymarketOrderResult {
+    let executions = response.get("executions").and_then(Value::as_array);
+    let Some(executions) = executions.filter(|executions| !executions.is_empty()) else {
+        let upstream_error = ["error", "message", "detail", "orderRejectReason", "text"]
+            .iter()
+            .find_map(|field| response.get(*field).and_then(Value::as_str))
+            .map(str::to_string);
+        warn!(
+            "Polymarket US order did not return an execution: request={} response={}",
+            request_body, response
+        );
+        return PolymarketOrderResult {
+            accepted: false,
+            filled_contracts: 0,
+            fill_quantity_valid: true,
+            order_id: None,
+            status: None,
+            error: Some(upstream_error.unwrap_or_else(|| {
+                "Polymarket US did not return an order execution".to_string()
+            })),
+            latency_ms: Some(latency_ms),
+            average_fill_price: None,
+        };
+    };
+
+    let execution = executions.last().expect("checked non-empty above");
+    let Some(order) = execution.get("order").filter(|order| order.is_object()) else {
+        warn!(
+            "Polymarket US execution did not include order details: request={} response={}",
+            request_body, response
+        );
+        return PolymarketOrderResult {
+            accepted: false,
+            filled_contracts: 0,
+            fill_quantity_valid: true,
+            order_id: None,
+            status: None,
+            error: Some("Polymarket US execution did not include order details".to_string()),
+            latency_ms: Some(latency_ms),
+            average_fill_price: None,
+        };
+    };
+
+    let order_id = order.get("id").and_then(Value::as_str).map(str::to_string);
+    let status = order
+        .get("state")
+        .or_else(|| order.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let filled = amount_as_f64(&order["cumQuantity"]).unwrap_or(0.0);
+
+    if filled > 0.0 {
+        let average_fill_price = extract_average_fill_price(response);
+        let fill_quantity_valid = filled.is_finite()
+            && filled >= 0.0
+            && filled.fract() == 0.0
+            && filled <= i32::MAX as f64;
+        info!(
+            "Polymarket US order FILLED: order_id={:?} market={:?} status={:?} filled={} avg_price={:?} latency_ms={}",
+            order_id,
+            order.get("marketSlug"),
+            status,
+            filled,
+            average_fill_price,
+            latency_ms
+        );
+        return PolymarketOrderResult {
+            accepted: true,
+            filled_contracts: if fill_quantity_valid { filled as i32 } else { 0 },
+            fill_quantity_valid,
+            order_id,
+            status,
+            error: if fill_quantity_valid {
+                None
+            } else {
+                Some("Polymarket US returned a non-whole or invalid fill quantity".to_string())
+            },
+            latency_ms: Some(latency_ms),
+            average_fill_price,
+        };
+    }
+
+    let reject_code = execution.get("orderRejectReason").and_then(Value::as_str);
+    let reject_text = execution.get("text").and_then(Value::as_str);
+    let error = match (reject_code, reject_text) {
+        (Some(code), Some(text)) if code != text => format!("{}: {}", code, text),
+        (Some(code), _) => code.to_string(),
+        (None, Some(text)) => text.to_string(),
+        (None, None) => format!(
+            "Order received no fill (state: {})",
+            status.as_deref().unwrap_or("unknown")
+        ),
+    };
+    warn!(
+        "Polymarket US order not filled: order_id={:?} status={:?} error={} request={} response={}",
+        order_id, status, error, request_body, response
+    );
+    PolymarketOrderResult {
+        accepted: order_id.is_some(),
+        filled_contracts: 0,
+        fill_quantity_valid: true,
+        order_id,
+        status,
+        error: Some(error),
+        latency_ms: Some(latency_ms),
+        average_fill_price: None,
+    }
+}
+
+fn extract_average_fill_price(response: &Value) -> Option<f64> {
+    let executions = response.get("executions")?.as_array()?;
+    let order = executions.last()?.get("order")?;
+    [
+        "avgPx",
+        "averageFillPrice",
+        "averagePrice",
+        "avgPrice",
+        "avg_price",
+    ]
+    .iter()
+    .find_map(|field| amount_as_f64(&order[*field]))
+    .filter(|price| price.is_finite() && (0.0..1.0).contains(price))
+}
+
+fn amount_as_f64(value: &Value) -> Option<f64> {
+    let value = value.get("value").unwrap_or(value);
+    value.as_f64().or_else(|| value.as_str()?.parse().ok())
+}
+
+fn sport_code(sport: &Value) -> Option<&str> {
+    ["sport", "code", "slug"]
+        .iter()
+        .find_map(|field| sport[*field].as_str())
+}
+
+fn sport_has_code(sport: &Value, expected_code: &str) -> bool {
+    ["sport", "code", "slug"]
+        .iter()
+        .filter_map(|field| sport[*field].as_str())
+        .any(|value| value.eq_ignore_ascii_case(expected_code))
+}
+
+fn sport_series_id(sport: &Value) -> Option<String> {
+    ["series", "seriesId", "series_id"]
+        .iter()
+        .find_map(|field| match &sport[*field] {
+            Value::String(value) if !value.is_empty() => Some(value.clone()),
+            Value::Number(value) => Some(value.to_string()),
+            _ => None,
+        })
+}
+
+fn parse_nba_market(
+    event_title: &str,
+    event_date: Option<DateTime<Utc>>,
+    market_data: &Value,
+) -> Option<(PolymarketEvent, PolymarketMarket)> {
+    let question = market_data["question"].as_str().unwrap_or(event_title);
+    if question != event_title {
+        return None;
+    }
+
+    let (outcomes, sides) = parse_binary_outcomes_and_market_sides(market_data, |outcome| {
+        if matches!(
+            outcome.trim().to_ascii_lowercase().as_str(),
+            "yes" | "no" | "over" | "under"
+        ) {
+            return None;
+        }
+        let normalized = normalize_team_name(outcome);
+        (!normalized.is_empty()).then_some(normalized)
+    })?;
+    let team_a = outcomes[0].clone();
+    let team_b = outcomes[1].clone();
+    if team_a == team_b {
+        return None;
+    }
+
+    let event_name = if team_a < team_b {
+        format!("{team_a}-{team_b}")
+    } else {
+        format!("{team_b}-{team_a}")
+    };
+    build_competitor_market(
+        market_data,
+        event_name,
+        team_a,
+        team_b,
+        sides[0],
+        sides[1],
+        event_date,
+        "NBA",
+    )
+}
+
+fn parse_tennis_match_winner_market(
+    event_date: Option<DateTime<Utc>>,
+    market_data: &Value,
+) -> Option<(PolymarketEvent, PolymarketMarket)> {
+    if market_data["sportsMarketType"].as_str() != Some("tennis_match_winner")
+        || market_data["sportsMarketTypeV2"].as_str() != Some("SPORTS_MARKET_TYPE_MONEYLINE")
+    {
+        return None;
+    }
+
+    let (outcomes, sides) =
+        parse_binary_outcomes_and_market_sides(market_data, normalize_competitor_name)?;
+    let competitor_a = outcomes[0].clone();
+    let competitor_b = outcomes[1].clone();
+    let event_name = competitor_event_name(&competitor_a, &competitor_b)?;
+
+    build_competitor_market(
+        market_data,
+        event_name,
+        competitor_a,
+        competitor_b,
+        sides[0],
+        sides[1],
+        event_date,
+        "TENNIS",
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MarketSide {
+    quote: f64,
+    position_side: PolymarketPositionSide,
+}
+
+/// Parse a binary market and associate every competitor with its own gateway
+/// market side. The outcome array supplies competitor names only; it never
+/// determines a LONG or SHORT position.
+fn parse_binary_outcomes_and_market_sides<F>(
+    market_data: &Value,
+    normalizer: F,
+) -> Option<([String; 2], [MarketSide; 2])>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let outcomes = parse_json_array(&market_data["outcomes"])?
+        .iter()
+        .map(|value| value.as_str().and_then(|name| normalizer(name)))
+        .collect::<Option<Vec<_>>>()?;
+    let outcomes: [String; 2] = outcomes.try_into().ok()?;
+    if outcomes[0] == outcomes[1] {
+        return None;
+    }
+
+    let market_sides = market_data["marketSides"].as_array()?;
+    let mut outcome_sides: [Option<MarketSide>; 2] = [None, None];
+    for market_side in market_sides {
+        let description = market_side["description"].as_str()?;
+        let Some(competitor) = normalizer(description) else {
+            continue;
+        };
+        let outcome_index = if competitor == outcomes[0] {
+            0
+        } else if competitor == outcomes[1] {
+            1
+        } else {
+            continue;
+        };
+
+        let quote = market_side["quote"]["value"]
+            .as_str()
+            .and_then(|price| price.parse::<f64>().ok())
+            .or_else(|| market_side["quote"]["value"].as_f64())?;
+        if !quote.is_finite() || !(0.01..=0.99).contains(&quote) {
+            return None;
+        }
+        let position_side = if market_side["long"].as_bool()? {
+            PolymarketPositionSide::Long
+        } else {
+            PolymarketPositionSide::Short
+        };
+
+        // A competitor must map to exactly one side. Continuing would make
+        // execution ambiguous and could choose the wrong position.
+        if outcome_sides[outcome_index].is_some() {
+            return None;
+        }
+        outcome_sides[outcome_index] = Some(MarketSide {
+            quote,
+            position_side,
+        });
+    }
+
+    Some((outcomes, [outcome_sides[0]?, outcome_sides[1]?]))
+}
+
+fn parse_json_array(value: &Value) -> Option<Vec<Value>> {
+    if let Some(serialized) = value.as_str() {
+        serde_json::from_str(serialized).ok()
+    } else {
+        value.as_array().cloned()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_competitor_market(
+    market_data: &Value,
+    event_name: String,
+    first_competitor: String,
+    second_competitor: String,
+    first_side: MarketSide,
+    second_side: MarketSide,
+    start_time: Option<DateTime<Utc>>,
+    category: &str,
+) -> Option<(PolymarketEvent, PolymarketMarket)> {
+    if first_competitor == second_competitor {
+        return None;
+    }
+
+    let market_id = market_data["id"].as_str().unwrap_or("");
+    let condition_id = market_data["conditionId"]
+        .as_str()
+        .or_else(|| market_data["condition_id"].as_str())
+        .unwrap_or(market_id)
+        .to_string();
+    if condition_id.is_empty() {
+        return None;
+    }
+
+    let market_slug = market_data["slug"].as_str()?.trim();
+    if market_slug.is_empty() {
+        return None;
+    }
+
+    let volume = market_data["volume"]
+        .as_str()
+        .and_then(|value| value.parse::<f64>().ok())
+        .or_else(|| market_data["volume"].as_f64());
+
+    let (team_a, team_b, side_a, side_b) = if first_competitor < second_competitor {
+        (first_competitor, second_competitor, first_side, second_side)
+    } else {
+        (second_competitor, first_competitor, second_side, first_side)
+    };
+
+    let market = PolymarketMarket {
+        market_id: condition_id.clone(),
+        market_slug: market_slug.to_string(),
+        event_name: event_name.clone(),
+        team_a: team_a.clone(),
+        team_b: team_b.clone(),
+        price_a: side_a.quote,
+        price_b: side_b.quote,
+        team_a_position: side_a.position_side,
+        team_b_position: side_b.position_side,
+        start_time,
+        volume,
+    };
+    let event = PolymarketEvent {
+        event_id: condition_id,
+        name: event_name,
+        team_a,
+        team_b,
+        start_time,
+        category: category.to_string(),
+        market: Some(market.clone()),
+    };
+
+    Some((event, market))
 }
 
 /// Extract date from slug (e.g., "lakers-vs-grizzlies-2026-01-07" -> 2026-01-07)
@@ -1151,3 +1183,173 @@ fn extract_date_from_slug(slug: &str) -> Option<DateTime<Utc>> {
     None
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn book(bids: Vec<(f64, f64)>, offers: Vec<(f64, f64)>) -> PolymarketMarketBook {
+        PolymarketMarketBook {
+            success: true,
+            market_slug: "test-market".to_string(),
+            state: "ACTIVE".to_string(),
+            transact_time: None,
+            fetched_at_ms: 0,
+            bids: bids
+                .into_iter()
+                .map(|(price, quantity)| PolymarketBookLevel { price, quantity })
+                .collect(),
+            offers: offers
+                .into_iter()
+                .map(|(price, quantity)| PolymarketBookLevel { price, quantity })
+                .collect(),
+            minimum_trade_qty: None,
+            price_tick_size: None,
+        }
+    }
+
+    #[test]
+    fn long_buy_depth_sums_native_offers_at_native_price() {
+        let book = book(vec![(0.50, 10.0)], vec![(0.22, 4.0), (0.25, 6.5)]);
+        let (usd, size) = book.buy_depth(PolymarketPositionSide::Long);
+        // quantity floors to whole tokens: 4 + 6 = 10; usd = 4*0.22 + 6*0.25
+        assert_eq!(size, 10.0);
+        assert!((usd - (4.0 * 0.22 + 6.0 * 0.25)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn short_buy_depth_sums_native_bids_at_complement_price() {
+        let book = book(vec![(0.70, 3.0)], vec![(0.22, 4.0)]);
+        let (usd, size) = book.buy_depth(PolymarketPositionSide::Short);
+        // Short buys consume native bids at 1 - price.
+        assert_eq!(size, 3.0);
+        assert!((usd - 3.0 * (1.0 - 0.70)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn buy_depth_ignores_non_positive_quantity_levels() {
+        let book = book(vec![], vec![(0.30, 0.0), (0.40, 2.0)]);
+        let (usd, size) = book.buy_depth(PolymarketPositionSide::Long);
+        assert_eq!(size, 2.0);
+        assert!((usd - 2.0 * 0.40).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parses_binary_tennis_match_winner_outcomes() {
+        let market = json!({
+            "id": "market-id",
+            "conditionId": "condition-id",
+            "slug": "atp-cerundolo-auger-2026-08-17",
+            "sportsMarketType": "tennis_match_winner",
+            "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+            "outcomes": "[\"Juan Manuel Cerundolo\", \"Felix Auger-Aliassime\"]",
+            "marketSides": [
+                {"description": "Juan Manuel Cerundolo", "long": false, "quote": {"value": "0.46"}},
+                {"description": "Felix Auger-Aliassime", "long": true, "quote": {"value": "0.56"}}
+            ]
+        });
+
+        let (event, parsed_market) = parse_tennis_match_winner_market(None, &market).unwrap();
+        assert_eq!(event.name, "FELIX AUGER ALIASSIME VS JUAN MANUEL CERUNDOLO");
+        assert_eq!(parsed_market.team_a, "FELIX AUGER ALIASSIME");
+        assert_eq!(parsed_market.price_a, 0.56);
+        assert_eq!(parsed_market.market_slug, "atp-cerundolo-auger-2026-08-17");
+        assert_eq!(
+            parsed_market
+                .us_execution_for_competitor("Felix Auger-Aliassime")
+                .unwrap()
+                .position_side,
+            PolymarketPositionSide::Long
+        );
+    }
+
+    #[test]
+    fn outcome_order_does_not_determine_position_side() {
+        let market = json!({
+            "id": "market-id",
+            "conditionId": "condition-id",
+            "slug": "atp-auger-cerundolo-2026-08-17",
+            "sportsMarketType": "tennis_match_winner",
+            "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+            "outcomes": "[\"Felix Auger-Aliassime\", \"Juan Manuel Cerundolo\"]",
+            "marketSides": [
+                {"description": "Juan Manuel Cerundolo", "long": true, "quote": {"value": "0.46"}},
+                {"description": "Felix Auger-Aliassime", "long": false, "quote": {"value": "0.56"}}
+            ]
+        });
+
+        let (_, parsed_market) = parse_tennis_match_winner_market(None, &market).unwrap();
+        assert_eq!(
+            parsed_market
+                .us_execution_for_competitor("Felix Auger-Aliassime")
+                .unwrap()
+                .position_side,
+            PolymarketPositionSide::Short
+        );
+        assert_eq!(
+            parsed_market
+                .us_execution_for_competitor("Juan Manuel Cerundolo")
+                .unwrap()
+                .position_side,
+            PolymarketPositionSide::Long
+        );
+    }
+
+    #[test]
+    fn rejects_missing_ambiguous_or_slugless_side_mappings() {
+        let base = json!({
+            "id": "market-id",
+            "conditionId": "condition-id",
+            "slug": "atp-auger-cerundolo-2026-08-17",
+            "sportsMarketType": "tennis_match_winner",
+            "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+            "outcomes": "[\"Felix Auger-Aliassime\", \"Juan Manuel Cerundolo\"]",
+            "marketSides": [
+                {"description": "Felix Auger-Aliassime", "long": true, "quote": {"value": "0.56"}},
+                {"description": "Juan Manuel Cerundolo", "long": false, "quote": {"value": "0.46"}}
+            ]
+        });
+
+        let mut missing_slug = base.clone();
+        missing_slug.as_object_mut().unwrap().remove("slug");
+        assert!(parse_tennis_match_winner_market(None, &missing_slug).is_none());
+
+        let mut missing_side = base.clone();
+        missing_side["marketSides"] = json!([
+            {"description": "Felix Auger-Aliassime", "long": true, "quote": {"value": "0.56"}}
+        ]);
+        assert!(parse_tennis_match_winner_market(None, &missing_side).is_none());
+
+        let mut ambiguous = base;
+        ambiguous["marketSides"] = json!([
+            {"description": "Felix Auger-Aliassime", "long": true, "quote": {"value": "0.56"}},
+            {"description": "Felix Auger-Aliassime", "long": false, "quote": {"value": "0.56"}},
+            {"description": "Juan Manuel Cerundolo", "long": false, "quote": {"value": "0.46"}}
+        ]);
+        assert!(parse_tennis_match_winner_market(None, &ambiguous).is_none());
+    }
+
+    #[test]
+    fn rejects_non_moneyline_tennis_markets() {
+        let market = json!({
+            "sportsMarketType": "tennis_tournament_winner",
+            "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_FUTURES",
+            "outcomes": "[\"Juan Manuel Cerundolo\", \"Felix Auger-Aliassime\"]",
+            "outcomePrices": "[\"0.45\", \"0.55\"]"
+        });
+
+        assert!(parse_tennis_match_winner_market(None, &market).is_none());
+    }
+
+    #[test]
+    fn extracts_sdk_average_fill_price() {
+        let response = json!({
+            "executions": [{
+                "order": {
+                    "avgPx": {"value": "0.6250", "currency": "USD"}
+                }
+            }]
+        });
+
+        assert_eq!(extract_average_fill_price(&response), Some(0.625));
+    }
+}

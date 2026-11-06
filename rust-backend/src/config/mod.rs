@@ -3,7 +3,7 @@
 //! Handles loading and parsing of TOML configuration files.
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
@@ -17,36 +17,48 @@ pub struct KalshiConfig {
 }
 
 fn default_kalshi_base_url() -> String {
-    "https://api.elections.kalshi.com/trade-api/v2".to_string()
+    "https://external-api.kalshi.com/trade-api/v2".to_string()
 }
 
-/// Polymarket API configuration
+/// Polymarket US API configuration.
 ///
-/// Order placement is handled by a separate Python service using the official SDK.
-/// Configure `order_service_url` to point to the Python order service.
+/// `base_url` is the public gateway (unauthenticated: events, sports, market
+/// book/detail). `api_base_url` is the authenticated API (orders, account,
+/// portfolio), signed with Ed25519 per request in `clients/polymarket.rs`.
+/// Credentials are preferably supplied via `POLYMARKET_KEY_ID` /
+/// `POLYMARKET_SECRET_KEY` env vars, falling back to `key_id`/`secret_key`
+/// below.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PolymarketConfig {
-    /// Gamma API base URL
+    /// Public gateway base URL
     #[serde(default = "default_poly_base_url")]
     pub base_url: String,
 
-    /// Python order service URL (handles all order placement)
-    #[serde(default = "default_order_service_url")]
-    pub order_service_url: String,
+    /// Authenticated API base URL
+    #[serde(default = "default_poly_api_base_url")]
+    pub api_base_url: String,
+
+    /// Polymarket US API key ID (UUID). Prefer the POLYMARKET_KEY_ID env var.
+    #[serde(default)]
+    pub key_id: String,
+
+    /// Base64-encoded Ed25519 secret key. Prefer the POLYMARKET_SECRET_KEY env var.
+    #[serde(default)]
+    pub secret_key: String,
 }
 
 fn default_poly_base_url() -> String {
-    "https://gamma-api.polymarket.com".to_string()
+    "https://gateway.polymarket.us".to_string()
 }
 
-fn default_order_service_url() -> String {
-    "http://127.0.0.1:8001".to_string()
+fn default_poly_api_base_url() -> String {
+    "https://api.polymarket.us".to_string()
 }
 
 /// Application settings
 #[derive(Debug, Clone, Deserialize)]
 pub struct SettingsConfig {
-    /// Refresh interval in seconds
+    /// Refresh interval in seconds (REST quote polling clamps to at least 3 seconds)
     #[serde(default = "default_refresh_interval")]
     pub refresh_interval: u64,
     /// Minimum profit margin percentage
@@ -61,7 +73,7 @@ pub struct SettingsConfig {
 }
 
 fn default_refresh_interval() -> u64 {
-    5
+    3
 }
 
 fn default_min_profit_margin() -> f64 {
@@ -69,11 +81,11 @@ fn default_min_profit_margin() -> f64 {
 }
 
 fn default_bet_amount() -> f64 {
-    10.0  // Testing phase: reduced from 100.0 to 10.0
+    10.0 // Testing phase: reduced from 100.0 to 10.0
 }
 
 fn default_tracking_threshold() -> f64 {
-    1.0  // Start tracking when profit >= 1%
+    1.0 // Start tracking when profit >= 1%
 }
 
 impl Default for SettingsConfig {
@@ -127,50 +139,6 @@ impl Default for AuthConfig {
     }
 }
 
-/// Auto-trade configuration (initial defaults, actual state stored in database)
-#[derive(Debug, Clone, Deserialize)]
-pub struct AutoTradeConfig {
-    /// Whether auto-trade is enabled by default
-    #[serde(default = "default_auto_trade_enabled")]
-    pub enabled: bool,
-    /// Maximum amount per trade in USD (自动下单单次最大金额)
-    #[serde(default = "default_auto_trade_max_amount")]
-    pub max_amount: f64,
-    /// Maximum trade count (自动下单最大执行次数)
-    #[serde(default = "default_auto_trade_max_count")]
-    pub max_trade_count: i32,
-    /// Minimum duration for opportunity in milliseconds (套利机会持续时间阈值)
-    #[serde(default = "default_auto_trade_min_duration")]
-    pub min_duration_ms: i64,
-}
-
-fn default_auto_trade_enabled() -> bool {
-    false
-}
-
-fn default_auto_trade_max_amount() -> f64 {
-    10.0
-}
-
-fn default_auto_trade_max_count() -> i32 {
-    2  // Testing phase: max 2 trades
-}
-
-fn default_auto_trade_min_duration() -> i64 {
-    500  // 500ms minimum duration
-}
-
-impl Default for AutoTradeConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_auto_trade_enabled(),
-            max_amount: default_auto_trade_max_amount(),
-            max_trade_count: default_auto_trade_max_count(),
-            min_duration_ms: default_auto_trade_min_duration(),
-        }
-    }
-}
-
 /// Telegram notification configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct TelegramConfig {
@@ -187,6 +155,115 @@ pub struct TelegramConfig {
 
 fn default_telegram_enabled() -> bool {
     false
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MentionMode {
+    Off,
+    Paper,
+    Live,
+}
+
+impl Default for MentionMode {
+    fn default() -> Self {
+        Self::Off
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct MentionConfig {
+    pub mode: MentionMode,
+    pub signal_url: String,
+    pub poll_interval_secs: u64,
+    pub max_signal_age_secs: u64,
+    pub bankroll_usd: f64,
+    pub kelly_fraction: f64,
+    pub min_net_edge: f64,
+    pub max_spread: f64,
+    pub min_book_depth_contracts: i32,
+    pub max_close_minutes: i64,
+    pub allow_hold_to_settlement: bool,
+    pub pre_event_only: bool,
+    pub max_market_risk_pct: f64,
+    pub max_event_risk_pct: f64,
+    pub max_day_risk_pct: f64,
+    pub max_total_open_risk_pct: f64,
+    pub max_open_positions: i32,
+    pub daily_loss_breaker_pct: f64,
+    pub live_gate_min_days: i64,
+    pub live_gate_max_age_days: i64,
+}
+
+impl Default for MentionConfig {
+    fn default() -> Self {
+        Self {
+            mode: MentionMode::Off,
+            signal_url: "http://127.0.0.1:8765".to_string(),
+            poll_interval_secs: 10,
+            max_signal_age_secs: 60,
+            bankroll_usd: 1000.0,
+            kelly_fraction: 0.25,
+            min_net_edge: 0.03,
+            max_spread: 0.10,
+            min_book_depth_contracts: 1,
+            max_close_minutes: 15,
+            allow_hold_to_settlement: false,
+            pre_event_only: true,
+            max_market_risk_pct: 0.01,
+            max_event_risk_pct: 0.02,
+            max_day_risk_pct: 0.03,
+            max_total_open_risk_pct: 0.05,
+            max_open_positions: 5,
+            daily_loss_breaker_pct: 0.03,
+            live_gate_min_days: 60,
+            live_gate_max_age_days: 14,
+        }
+    }
+}
+
+impl MentionConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        let finite_positive = [self.bankroll_usd, self.min_net_edge]
+            .into_iter()
+            .all(|value| value.is_finite() && value > 0.0);
+        if !finite_positive {
+            return Err("mention bankroll and min_net_edge must be finite and positive".into());
+        }
+        if !self.kelly_fraction.is_finite() || !(0.0..=1.0).contains(&self.kelly_fraction) {
+            return Err("mention kelly_fraction must be finite and in [0,1]".into());
+        }
+        if !self.max_spread.is_finite() || !(0.0..1.0).contains(&self.max_spread) {
+            return Err("mention max_spread must be finite and in (0,1)".into());
+        }
+        let risk_caps = [
+            self.max_market_risk_pct,
+            self.max_event_risk_pct,
+            self.max_day_risk_pct,
+            self.max_total_open_risk_pct,
+            self.daily_loss_breaker_pct,
+        ];
+        if risk_caps
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0 || *value > 1.0)
+        {
+            return Err("mention risk percentages must be finite and in (0,1]".into());
+        }
+        if self.max_signal_age_secs == 0
+            || self.poll_interval_secs == 0
+            || self.min_book_depth_contracts <= 0
+            || self.max_close_minutes < 0
+            || self.max_open_positions <= 0
+            || self.live_gate_min_days <= 0
+            || self.live_gate_max_age_days <= 0
+        {
+            return Err(
+                "mention ages, counts, depth, and gate requirements must be positive".into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 impl Default for TelegramConfig {
@@ -209,9 +286,9 @@ pub struct Config {
     #[serde(default)]
     pub auth: AuthConfig,
     #[serde(default)]
-    pub auto_trade: AutoTradeConfig,
-    #[serde(default)]
     pub telegram: TelegramConfig,
+    #[serde(default)]
+    pub mention: MentionConfig,
 }
 
 impl Config {
@@ -253,16 +330,5 @@ impl Config {
             toml::from_str(&contents).with_context(|| "Failed to parse config file")?;
 
         Ok(config)
-    }
-
-    /// Validate configuration
-    pub fn validate(&self) -> Result<()> {
-        if self.kalshi.api_key.is_empty() {
-            anyhow::bail!("Kalshi API key is not configured");
-        }
-        if self.kalshi.api_secret.is_empty() {
-            anyhow::bail!("Kalshi API secret is not configured");
-        }
-        Ok(())
     }
 }

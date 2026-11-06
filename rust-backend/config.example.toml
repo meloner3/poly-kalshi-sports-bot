@@ -1,75 +1,105 @@
-# Polytaoli - 预测市场套利程序配置文件
-# 这是配置文件模板，请复制为 config.toml 并填入你的实际凭据
+# Polytaoli - Prediction Market Arbitrage Application Configuration
+# This is a configuration template. Copy it to config.toml and enter your credentials.
 
 [kalshi]
-# Kalshi API Key（从 https://kalshi.com/profile/api 获取）
+# Kalshi API Key (obtain it from https://kalshi.com/profile/api)
 api_key = "your-kalshi-api-key-here"
 
-# Kalshi API Secret（RSA 私钥）
-# 支持 PKCS#1 格式（-----BEGIN RSA PRIVATE KEY-----）
-# 或 PKCS#8 格式（-----BEGIN PRIVATE KEY-----）
+# Kalshi API Secret (RSA private key)
+# Supports PKCS#1 format (-----BEGIN RSA PRIVATE KEY-----)
+# Or PKCS#8 format (-----BEGIN PRIVATE KEY-----)
 api_secret = """-----BEGIN RSA PRIVATE KEY-----
 YOUR_KALSHI_PRIVATE_KEY_HERE
 -----END RSA PRIVATE KEY-----"""
 
-# Kalshi API 基础 URL
-base_url = "https://api.elections.kalshi.com/trade-api/v2"
+# Kalshi Trade API v2 base URL
+base_url = "https://external-api.kalshi.com/trade-api/v2"
 
 [polymarket]
-# Polymarket 配置
-# 
-# Gamma API 基础 URL（用于获取市场数据）
-base_url = "https://gamma-api.polymarket.com"
+# Polymarket US API configuration. Generate keys at https://polymarket.us/developer.
+# This config file is ignored by Git once copied to config.toml.
+# Preferably set via the POLYMARKET_KEY_ID / POLYMARKET_SECRET_KEY env vars
+# instead of storing them here; these are only a fallback.
+key_id = ""
+secret_key = ""
 
-# Python 下单服务地址（订单通过此服务提交）
-# Polymarket 下单由单独的 Python 服务处理，使用官方 py-clob-client SDK
-# 私钥和钱包地址等凭据在 Python 服务中配置
-order_service_url = "http://127.0.0.1:8001"
+# Polymarket US public gateway base URL (unauthenticated: events, sports, market book/detail)
+base_url = "https://gateway.polymarket.us"
 
-# [settings] 和 [auto_trade] 配置已迁移到数据库
-# 可在前端界面实时修改，无需重启服务
-# 以下为初始默认值（首次启动时写入数据库）
+# Polymarket US authenticated API base URL (orders, account, portfolio)
+# Requests are signed directly by the Rust backend (Ed25519) - no separate order service.
+api_base_url = "https://api.polymarket.us"
+
+# The [settings] and [auto_trade] configuration has moved to the database.
+# It can be changed in real time through the frontend without restarting the service.
+# The following are initial defaults, written to the database at first startup.
 
 [settings]
-# 数据刷新间隔（秒）
-refresh_interval = 5
-# 显示套利机会的最小利润率（%）
+# Data refresh interval (seconds)
+refresh_interval = 3
+# Minimum profit margin (%) for displaying arbitrage opportunities
 min_profit_margin = 1.0
-# 套利计算使用的默认金额（美元）
+# Default amount (USD) used for arbitrage calculations
 default_bet_amount = 10.0
-# 开始追踪记录的利润率阈值（%）
+# Profit-margin threshold (%) for starting tracking
 tracking_threshold = 2.0
 
 [auto_trade]
-# 自动下单功能默认关闭
+# Automated trading is disabled by default
 enabled = false
-# 自动下单单次最大金额（美元）
+# Maximum amount (USD) per automated trade
 max_amount = 10.0
-# 自动下单最大执行次数
+# Maximum number of automated trades
 max_trade_count = 2
-# 套利机会持续时间阈值（毫秒）
+# Arbitrage opportunity duration threshold (milliseconds)
 min_duration_ms = 500
 
 [auth]
-# Web UI 登录认证配置
+# Web UI login authentication configuration
 username = "admin"
 password = "admin123"
 
-# JWT 密钥（请修改为随机字符串，至少 32 字符）
+# JWT key (change this to a random string of at least 32 characters)
 secret_key = "your-secret-key-change-this-in-production-min-32-chars-long"
 
-# Token 过期时间（小时）
+# Token expiration time (hours)
 token_expire_hours = 24
 
 [telegram]
-# Telegram 通知配置（自动下单通知）
-# 默认关闭，需要时启用
+# Telegram notification configuration (automated-trade notifications)
+# Disabled by default; enable when needed.
 enabled = false
 
-# Telegram Bot Token（从 @BotFather 获取）
+# Telegram Bot Token (obtain it from @BotFather)
 bot_token = "YOUR_BOT_TOKEN_HERE"
 
-# Telegram Chat ID（群组或频道 ID）
-# 获取方式：将 bot 添加到群组后，发送消息，然后访问
+# Telegram Chat ID (group or channel ID)
+# To obtain it, add the bot to a group, send a message, then visit
 # https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
 chat_id = "YOUR_CHAT_ID_HERE"
+
+# Independent directional Kalshi mention strategy. Kept separate from the
+# paired arbitrage auto-trader and OFF by default.
+[mention]
+mode = "off" # off | paper | live (live also requires a passing current paper gate)
+signal_url = "http://127.0.0.1:8765"
+poll_interval_secs = 10
+max_signal_age_secs = 60
+bankroll_usd = 1000.0
+kelly_fraction = 0.25
+min_net_edge = 0.03
+max_spread = 0.10
+min_book_depth_contracts = 1
+max_close_minutes = 15
+allow_hold_to_settlement = false
+# Only open positions before 00:00 US Eastern (conservatively 04:00 UTC) of the event date
+# parsed from the ticker; tickers with no parseable date are rejected. Exits are always allowed.
+pre_event_only = true
+max_market_risk_pct = 0.01
+max_event_risk_pct = 0.02
+max_day_risk_pct = 0.03
+max_total_open_risk_pct = 0.05
+max_open_positions = 5
+daily_loss_breaker_pct = 0.03
+live_gate_min_days = 60
+live_gate_max_age_days = 14

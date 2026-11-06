@@ -27,9 +27,16 @@ impl TelegramClient {
 
     /// Check if Telegram notifications are enabled and configured
     pub fn is_enabled(&self) -> bool {
-        self.config.enabled 
-            && !self.config.bot_token.is_empty() 
-            && !self.config.chat_id.is_empty()
+        self.config.enabled && !self.config.bot_token.is_empty() && !self.config.chat_id.is_empty()
+    }
+
+    pub async fn send_alert(&self, message: &str) {
+        if !self.is_enabled() {
+            return;
+        }
+        if let Err(error) = self.send_message(message).await {
+            error!("Telegram alert send failed: {:#}", error);
+        }
     }
 
     /// Send auto-trade notification
@@ -62,7 +69,7 @@ impl TelegramClient {
         );
 
         if let Err(e) = self.send_message(&message).await {
-            error!("Telegram 通知发送失败: {}", e);
+            error!("Telegram 通知发送失败: {:#}", e);
         }
     }
 
@@ -87,28 +94,25 @@ impl TelegramClient {
             "❌"
         };
 
-        let mut message = format!(
-            "{} 自动下单通知\n\n",
-            status_icon
-        );
-        
-        message.push_str(&format!("事件: {}\n", event_name));
-        message.push_str(&format!("队伍: {}\n", team_name));
-        message.push_str(&format!("利润率: {:.2}%\n", profit_margin));
-        message.push_str(&format!("投入金额: ${:.2}\n", total_amount));
-        message.push_str(&format!("预期利润: ${:.2}\n\n", expected_profit));
-        
+        let mut message = format!("{} Auto-trade notification\n\n", status_icon);
+
+        message.push_str(&format!("Event: {}\n", event_name));
+        message.push_str(&format!("Team: {}\n", team_name));
+        message.push_str(&format!("Profit margin: {:.2}%\n", profit_margin));
+        message.push_str(&format!("Amount invested: ${:.2}\n", total_amount));
+        message.push_str(&format!("Expected profit: ${:.2}\n\n", expected_profit));
+
         let kalshi_status = if kalshi_success {
             "✅ 成功".to_string()
         } else {
-            format!("❌ 失败 - {}", kalshi_error.unwrap_or("未知错误"))
+            format!("❌ Failed - {}", kalshi_error.unwrap_or("Unknown error"))
         };
         message.push_str(&format!("Kalshi: {}\n", kalshi_status));
-        
+
         let poly_status = if poly_success {
             "✅ 成功".to_string()
         } else {
-            format!("❌ 失败 - {}", poly_error.unwrap_or("未知错误"))
+            format!("❌ Failed - {}", poly_error.unwrap_or("Unknown error"))
         };
         message.push_str(&format!("Polymarket: {}\n", poly_status));
 
@@ -128,18 +132,14 @@ impl TelegramClient {
             "parse_mode": "HTML",
         });
 
-        let response = self.http
-            .post(&url)
-            .json(&payload)
-            .send()
-            .await?;
+        let response = self.http.post(&url).json(&payload).send().await?;
 
         if response.status().is_success() {
-            info!("Telegram 通知发送成功");
+            info!("Telegram notification sent successfully");
             Ok(())
         } else {
             let error_text = response.text().await?;
-            anyhow::bail!("Telegram API 错误: {}", error_text)
+            anyhow::bail!("Telegram API error: {}", error_text)
         }
     }
 }

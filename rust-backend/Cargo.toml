@@ -33,6 +33,9 @@ hex = "0.4"
 rsa = { version = "0.9", features = ["sha2"] }
 pkcs8 = { version = "0.10", features = ["pem"] }
 
+# Ed25519 signing (Polymarket US)
+ed25519-dalek = "2"
+
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }
 

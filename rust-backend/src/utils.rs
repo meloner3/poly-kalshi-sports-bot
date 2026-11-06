@@ -1,6 +1,5 @@
 //! Utility functions
 
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -26,70 +25,23 @@ pub fn init_debug_log_path(workspace_root: Option<&str>) {
             })
             .unwrap_or_else(|| PathBuf::from("logs/debug.log"))
     };
-    
+
     // Ensure logs directory exists
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    
+
     let _ = DEBUG_LOG_PATH.set(path);
 }
 
 /// Get debug log path
 pub fn get_debug_log_path() -> PathBuf {
-    DEBUG_LOG_PATH
-        .get()
-        .cloned()
-        .unwrap_or_else(|| {
-            // Fallback if not initialized
-            let path = PathBuf::from("logs/debug.log");
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            path
-        })
-}
-
-/// Write a JSON debug log entry
-pub fn write_debug_log(location: &str, message: &str, data: serde_json::Value) {
-    let debug_log = serde_json::json!({
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-        "location": location,
-        "message": message,
-        "data": data
-    });
-    
-    let path = get_debug_log_path();
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        let _ = writeln!(f, "{}", debug_log.to_string());
-    }
-}
-
-/// Write a JSON debug log entry with hypothesis ID
-pub fn write_debug_log_with_hypothesis(
-    location: &str,
-    hypothesis_id: &str,
-    message: &str,
-    data: serde_json::Value,
-) {
-    let debug_log = serde_json::json!({
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-        "location": location,
-        "hypothesisId": hypothesis_id,
-        "message": message,
-        "data": data
-    });
-    
-    let path = get_debug_log_path();
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        let _ = writeln!(f, "{}", debug_log.to_string());
-    }
+    DEBUG_LOG_PATH.get().cloned().unwrap_or_else(|| {
+        // Fallback if not initialized
+        let path = PathBuf::from("logs/debug.log");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        path
+    })
 }

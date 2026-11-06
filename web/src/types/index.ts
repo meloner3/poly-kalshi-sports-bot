@@ -31,9 +31,94 @@ export interface ScanResponse {
   matched_count: number;
 }
 
+export interface MentionSignalRow {
+  signal: {
+    market_ticker: string;
+    event_id?: string | null;
+    event_day?: string | null;
+    phrase?: string | null;
+    p_hat: number | null;
+    p_lo: number | null;
+    p_hi: number | null;
+    model_version?: string | null;
+    status: string;
+    reason?: string | null;
+  };
+  signal_fresh: boolean;
+  yes_bid: number | null;
+  yes_ask: number | null;
+  no_bid: number | null;
+  no_ask: number | null;
+  net_edge_yes: number | null;
+  net_edge_no: number | null;
+}
+
+export interface MentionStatus {
+  mode: 'off' | 'paper' | 'live';
+  kill_switch: boolean;
+  loss_breaker: boolean;
+  breaker_day?: string | null;
+  today_realized_pnl?: number;
+  realized_pnl?: number;
+  today_realized_pnl_paper?: number;
+  today_realized_pnl_live?: number;
+  realized_pnl_paper?: number;
+  realized_pnl_live?: number;
+  open_positions?: number;
+  open_exposure?: number;
+  live_order_lookup_confirmed?: boolean;
+  signal_service_healthy?: boolean;
+  predictor_model_version?: string | null;
+  strategy_model_version?: string | null;
+  limits?: {
+    min_net_edge: number;
+    max_open_positions: number;
+    live_gate_min_days: number;
+    max_spread: number;
+    max_signal_age_secs: number;
+    pre_event_only: boolean;
+    bankroll_usd: number;
+  };
+  gate?: {
+    edge_estimate?: number | null;
+    ci_low?: number | null;
+    ci_high?: number | null;
+    n_days?: number;
+    as_of?: string | null;
+    live_gate_passed?: boolean;
+    status?: string;
+  } | null;
+  error?: string;
+}
+
+export interface MentionDecision {
+  id: number;
+  market_ticker: string;
+  side?: string | null;
+  net_edge?: number | null;
+  decision: string;
+  reason: string;
+  created_at: string;
+}
+
+export interface MentionPosition {
+  id: number;
+  market_ticker: string;
+  side: string;
+  mode: 'paper' | 'live';
+  contracts: number;
+  remaining_contracts: number;
+  entry_vwap: number;
+  net_pnl: number | null;
+  outcome_yes: number | boolean | null;
+  status: string;
+  created_at: string;
+}
+
 export interface WsMessage {
-  type: 'opportunity' | 'opportunities' | 'opportunities_list' | 'matched_markets_list' | 'scan_started' | 'scan_completed' | 'log' | 'ping' | 'pong' | 'connected' | 'stats' | 'metrics';
-  data?: ArbitrageOpportunity | ArbitrageOpportunity[] | MatchedMarketData[] | MetricsReport;
+  type: 'opportunity' | 'opportunities' | 'opportunities_list' | 'matched_markets_list' | 'scan_started' | 'scan_completed' | 'log' | 'ping' | 'pong' | 'connected' | 'stats' | 'metrics' | 'mention_signals';
+  data?: ArbitrageOpportunity | ArbitrageOpportunity[] | MatchedMarketData[] | MetricsReport | MentionSignalRow[];
+  status?: MentionStatus;
   kalshi_count?: number;
   polymarket_count?: number;
   matched_count?: number;
@@ -44,7 +129,7 @@ export interface WsMessage {
   timestamp?: string;
 }
 
-// 性能监控相关类型
+// Performance monitoring types
 export interface OperationStats {
   name: string;
   count: number;
@@ -63,15 +148,17 @@ export interface MetricsReport {
   api_latency: ApiLatency;
 }
 
-// 匹配市场数据（包含实时价格）
+// Matched market data, including real-time prices
 export interface MatchedMarketData {
   event_name: string;
   team_name: string;
   game_date?: string;               // Game date in YYYY-MM-DD format
   kalshi_market_id: string;
   polymarket_market_id: string;
-  poly_token_id?: string;           // Polymarket token_id for Yes orderbook
-  poly_opponent_token_id?: string;  // Polymarket opponent token_id for No orderbook
+  polymarket_market_slug: string;
+  polymarket_team_position_side: 'long' | 'short';
+  polymarket_opponent_position_side: 'long' | 'short';
+  polymarket_opponent_name: string;
   kalshi_yes_price: number;
   kalshi_no_price: number;
   poly_yes_price: number;
@@ -81,13 +168,13 @@ export interface MatchedMarketData {
   both_ready: boolean;
   confidence: number;
   end_time?: string;
-  // 套利相关
+  // Arbitrage fields
   has_opportunity: boolean;
   profit_margin: number;
-  expected_profit: number;  // 净利润（扣除费用后）
-  gross_profit?: number;    // 毛利润（扣除费用前）
-  kalshi_contracts?: number;  // Kalshi 合约数量
-  kalshi_fee?: number;      // Kalshi 交易费用
+  expected_profit: number;  // Net profit after fees
+  gross_profit?: number;    // Gross profit before fees
+  kalshi_contracts?: number;  // Number of Kalshi contracts
+  kalshi_fee?: number;      // Kalshi trading fee
   arbitrage_type?: string;
 }
 
@@ -97,7 +184,7 @@ export interface LogEntry {
   message: string;
 }
 
-// 套利追踪记录
+// Arbitrage tracking record
 export interface ProfitHistoryEntry {
   time: string;
   profit_margin: number;
@@ -113,13 +200,13 @@ export interface TrackingRecord {
   start_time: string;
   end_time: string | null;
   duration_seconds: number | null;
-  duration_ms: number | null;  // 毫秒级持续时间
+  duration_ms: number | null;  // Duration in milliseconds
   max_profit_margin: number;
   max_profit_time: string | null;
   profit_history: ProfitHistoryEntry[];
-  // 深度信息
-  poly_ask_depth: number;  // Polymarket ask 深度 (USD)
-  kalshi_ask_depth: number;  // Kalshi ask 深度 (contracts)
+  // Depth information
+  poly_ask_depth: number;  // Polymarket ask depth (USD)
+  kalshi_ask_depth: number;  // Kalshi ask depth (contracts)
 }
 
 export interface ActiveTracking {
@@ -137,7 +224,7 @@ export interface TrackingStats {
   recent_completed: TrackingRecord[];
 }
 
-// 数据覆盖率
+// Data coverage
 export interface DataCoverage {
   total_markets: number;
   kalshi_ready: number;
@@ -148,11 +235,13 @@ export interface DataCoverage {
   full_coverage: string;
   kalshi_connected: boolean;
   polymarket_connected: boolean;
+  kalshi_source: 'rest_polling';
+  polymarket_source: 'rest_polling';
   kalshi_latency_ms?: number;
   polymarket_latency_ms?: number;
 }
 
-// 账户余额
+// Account balances
 export interface PlatformBalance {
   available: boolean;
   balance?: number;
@@ -169,9 +258,9 @@ export interface AccountBalance {
   polymarket: PlatformBalance;
 }
 
-// ==================== 交易相关类型 ====================
+// ==================== Trading Types ====================
 
-// Kalshi 订单
+// Kalshi order
 export interface KalshiOrder {
   order_id: string;
   user_id?: string;
@@ -194,19 +283,26 @@ export interface KalshiOrder {
   last_update_time?: string;
 }
 
-// Kalshi 持仓
+// Kalshi position
 export interface KalshiPosition {
   ticker: string;
   event_ticker?: string;
-  market_exposure: number;
-  position: number;
-  resting_orders_count: number;
-  fees_paid?: number;
-  total_traded?: number;
-  realized_pnl?: number;
+  /** Legacy normalized fields. */
+  market_exposure?: number | string;
+  position?: number | string;
+  resting_orders_count?: number;
+  fees_paid?: number | string;
+  total_traded?: number | string;
+  realized_pnl?: number | string;
+  /** Native Kalshi v2 portfolio position fields. Values are denominated in USD. */
+  market_exposure_dollars?: number | string;
+  position_fp?: number | string;
+  fees_paid_dollars?: number | string;
+  total_traded_dollars?: number | string;
+  realized_pnl_dollars?: number | string;
 }
 
-// Kalshi 下单请求
+// Kalshi order request
 export interface KalshiOrderRequest {
   ticker: string;
   side: 'yes' | 'no';
@@ -214,17 +310,19 @@ export interface KalshiOrderRequest {
   count: number;
 }
 
-// 兼容旧代码
+// Backward compatibility
 export type OrderRequest = KalshiOrderRequest;
 
-// Polymarket 下单请求
+// Polymarket order request
 export interface PolymarketOrderRequest {
-  token_id: string;
+  market_slug: string;
+  position_side: 'long' | 'short';
   side: 'buy' | 'sell';
-  amount: number;  // USDC 金额
+  contracts: number;
+  price: number;
 }
 
-// 下单响应
+// Order response
 export interface OrderResponse {
   success: boolean;
   order?: KalshiOrder;
@@ -232,18 +330,19 @@ export interface OrderResponse {
   error?: string;
 }
 
-// Polymarket 下单响应
+// Polymarket order response
 export interface PolymarketOrderResponse {
   success: boolean;
   order_id?: string;
   status?: string;
+  filled_contracts?: number;
   taking_amount?: string;
   making_amount?: string;
   elapsed_ms?: number;
   error?: string;
 }
 
-// Polymarket 订单
+// Polymarket order
 export interface PolymarketOrder {
   id: string;
   status: string;
@@ -260,7 +359,7 @@ export interface PolymarketOrder {
   order_type: string;
 }
 
-// Polymarket 持仓
+// Polymarket position
 export interface PolymarketPosition {
   id?: string;
   asset?: string;
@@ -273,76 +372,116 @@ export interface PolymarketPosition {
   pnl?: string;
   pnlPercent?: string;
   title?: string;
-  // 可能有其他字段，根据 API 响应动态处理
+  // Additional fields may be handled dynamically from the API response.
   [key: string]: unknown;
 }
 
-// 统一持仓类型（用于合并展示）
+// Unified position type for combined display
 export interface UnifiedPosition {
   id: string;
   platform: 'kalshi' | 'polymarket';
-  ticker: string;        // Kalshi ticker 或 Poly conditionId
-  title?: string;        // 市场标题
-  size: number;          // 持仓数量
+  ticker: string;        // Kalshi ticker or Polymarket condition ID
+  title?: string;        // Market title
+  size: number;          // Position size
   side?: 'yes' | 'no' | 'buy' | 'sell';
-  avgPrice?: number;     // 平均价格
-  curPrice?: number;     // 当前价格
-  value?: number;        // 持仓价值
-  pnl?: number;          // 盈亏
-  pnlPercent?: number;   // 盈亏百分比
+  avgPrice?: number;     // Average price
+  curPrice?: number;     // Current price
+  value?: number;        // Position value
+  pnl?: number;          // Profit and loss
+  pnlPercent?: number;   // Profit and loss percentage
 }
 
-// 订单列表响应
+// Unified positions endpoint (/api/positions/unified)
+export interface PositionLeg {
+  platform: 'kalshi' | 'polymarket';
+  market_id: string;
+  title: string;
+  /** Kalshi: yes/no. Polymarket: long/short. */
+  side: string;
+  contracts: number;
+  entry_price: number | null;
+  current_price: number | null;
+  cost: number;
+  value: number | null;
+  unrealized_pnl: number | null;
+  /** null = unknown (Polymarket exposes no fee field). */
+  fees: number | null;
+}
+
+export interface PositionCard {
+  kind: 'paired' | 'standalone';
+  event_name: string | null;
+  legs: PositionLeg[];
+  total_cost: number;
+  total_value: number | null;
+  total_pnl: number | null;
+  contracts_mismatch: boolean;
+}
+
+export interface UnifiedPositionsResponse {
+  cards: PositionCard[];
+  errors: string[];
+}
+
+// Orders list response
 export interface OrdersResponse {
   orders: KalshiOrder[];
   error?: string;
 }
 
-// Polymarket 订单列表响应
+// Polymarket orders list response
 export interface PolymarketOrdersResponse {
   orders: PolymarketOrder[];
   error?: string;
 }
 
-// 持仓列表响应
+// Positions list response
 export interface PositionsResponse {
   positions: KalshiPosition[];
   error?: string;
 }
 
-// 套利执行请求
+// Arbitrage execution request
 export interface ArbitrageExecuteRequest {
-  kalshi_ticker: string;
+  event_name: string;
+  team_name: string;
   kalshi_side: 'yes' | 'no';
-  kalshi_bet: number;
-  kalshi_price: number;
-  poly_token_id: string;
-  poly_side: 'buy' | 'sell';
-  poly_amount: number;
+  polymarket_competitor: string;
+  contracts: number;
+  /** When true, sizing/pricing is computed against real depth but nothing is submitted to either exchange. */
+  dry_run: boolean;
 }
 
-// 套利执行响应
+// Arbitrage execution response
 export interface ArbitrageExecuteResponse {
   success: boolean;
+  status?: string;
   error?: string;
-  kalshi: {
+  contracts?: number;
+  kalshi_price?: number;
+  polymarket_price?: number;
+  profit_margin?: number;
+  kalshi?: {
     success: boolean;
     order?: Record<string, unknown>;
     elapsed_ms?: number;
     count?: number;
+    order_id?: string;
+    filled_contracts?: number;
     error?: string;
   };
-  polymarket: {
+  polymarket?: {
     success: boolean;
     order_id?: string;
     status?: string;
     elapsed_ms?: number;
     amount?: number;
+    filled_contracts?: number;
     error?: string;
   };
 }
 
-// 订单簿深度
+// Order book depth
 export interface SideDepth {
   price?: number;
   size?: number;

@@ -34,7 +34,7 @@ pub async fn get_arbitrage_history(
         }))
         .into_response(),
         Err(e) => {
-            error!("获取历史记录失败: {}", e);
+            error!("Failed to get history records: {:#}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
@@ -85,7 +85,7 @@ pub async fn search_history(
     ) {
         Ok(result) => Json(result).into_response(),
         Err(e) => {
-            error!("搜索历史记录失败: {}", e);
+            error!("Failed to search history records: {:#}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
@@ -106,7 +106,7 @@ pub async fn get_history_statistics(State(state): State<Arc<AppState>>) -> impl 
     match service.get_history_statistics() {
         Ok(stats) => Json(stats).into_response(),
         Err(e) => {
-            error!("获取历史统计失败: {}", e);
+            error!("Failed to get history statistics: {:#}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({

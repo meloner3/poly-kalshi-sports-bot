@@ -9,39 +9,39 @@ export function MetricsPanel({ metrics }: MetricsPanelProps) {
     return (
       <div className="p-3 h-full flex flex-col items-center justify-center">
         <div className="text-2xl mb-2">⏳</div>
-        <div className="text-xs text-[--text-muted]">等待性能数据...</div>
-        <div className="text-[10px] text-[--text-muted] mt-1">每 10 秒更新一次</div>
+        <div className="text-xs text-[--text-muted]">Waiting for performance data...</div>
+        <div className="text-[10px] text-[--text-muted] mt-1">Updates every 10 seconds</div>
       </div>
     );
   }
 
   return (
     <div className="h-full flex flex-col">
-      {/* 标题 */}
+      {/* Title */}
       <div className="px-3 py-2 border-b border-[--border-color] bg-[--bg-tertiary] flex-shrink-0">
         <h3 className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider flex items-center gap-2">
           <span>📊</span>
-          性能监控
-          <span className="text-[10px] font-normal text-[--text-muted]">(10s 统计)</span>
+          Performance Monitor
+          <span className="text-[10px] font-normal text-[--text-muted]">(10-second statistics)</span>
         </h3>
       </div>
 
-      {/* 操作统计表 */}
+      {/* Operation statistics table */}
       <div className="flex-1 overflow-y-auto p-3">
         <div className="bg-[--bg-tertiary] rounded p-2.5">
           <div className="text-[10px] text-[--text-muted] mb-2 flex items-center gap-1">
-            <span>⚡</span> 操作统计
+            <span>⚡</span> Operation Statistics
           </div>
           
-          {/* 表头 */}
+          {/* Table header */}
           <div className="grid grid-cols-5 gap-1 text-[9px] text-[--text-muted] pb-1 border-b border-[--border-color] mb-1">
-            <div className="col-span-2">操作</div>
-            <div className="text-right">次数</div>
-            <div className="text-right">平均</div>
-            <div className="text-right">最大</div>
+            <div className="col-span-2">Operation</div>
+            <div className="text-right">Count</div>
+            <div className="text-right">Average</div>
+            <div className="text-right">Maximum</div>
           </div>
           
-          {/* 数据行 */}
+          {/* Data rows */}
           <div className="space-y-0.5">
             {metrics.operations
               .filter(op => op.count > 0)
@@ -67,14 +67,14 @@ export function MetricsPanel({ metrics }: MetricsPanelProps) {
             
             {metrics.operations.filter(op => op.count > 0).length === 0 && (
               <div className="text-center text-[10px] text-[--text-muted] py-2">
-                暂无操作统计
+                No operation statistics available
               </div>
             )}
           </div>
         </div>
       </div>
 
-      {/* 延迟说明 */}
+      {/* Latency description */}
       <div className="px-3 py-2 border-t border-[--border-color] bg-[--bg-tertiary] flex-shrink-0">
         <div className="text-[9px] text-[--text-muted] flex items-center justify-around">
           <div className="flex items-center gap-1">

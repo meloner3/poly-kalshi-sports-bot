@@ -35,9 +35,9 @@ interface AutoTradeRecord {
   polymarket_price: number;
   total_amount: number;
   profit_margin: number;
-  /** 机会持续时间（下单前，毫秒） */
+  /** Opportunity duration before order placement, in milliseconds. */
   duration_ms: number;
-  /** 从发现机会到下单完成的总耗时（毫秒） */
+  /** Total duration from detecting an opportunity through order completion, in milliseconds. */
   total_duration_ms: number;
   kalshi_success: boolean;
   polymarket_success: boolean;
@@ -45,9 +45,9 @@ interface AutoTradeRecord {
   polymarket_order_id?: string;
   kalshi_error?: string;
   polymarket_error?: string;
-  /** Kalshi API 延迟（毫秒） */
+  /** Kalshi API latency in milliseconds. */
   kalshi_latency_ms?: number;
-  /** Polymarket API 延迟（毫秒） */
+  /** Polymarket API latency in milliseconds. */
   poly_latency_ms?: number;
   status: string; // "executed" | "partial" | "skipped"
   skip_reason?: string;
@@ -99,7 +99,7 @@ export function ArbitrageHistory({ apiBaseUrl, onOpenExplorer }: ArbitrageHistor
     };
 
     fetchHistory();
-    // 每 5 秒刷新一次
+    // Refresh every five seconds.
     const interval = setInterval(fetchHistory, 5000);
     return () => clearInterval(interval);
   }, [apiBaseUrl]);
@@ -122,32 +122,32 @@ export function ArbitrageHistory({ apiBaseUrl, onOpenExplorer }: ArbitrageHistor
 
   const formatTime = (timeStr: string) => {
     const date = new Date(timeStr);
-    return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   };
 
   const formatDate = (timeStr: string) => {
     const date = new Date(timeStr);
-    return date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
+    return date.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit' });
   };
 
-  // 获取下单状态样式
+  // Get order status styles.
   const getTradeStatus = (record: AutoTradeRecord) => {
-    // 优先检查 status 字段
+    // Check the status field first.
     if (record.status === 'skipped') {
-      return { text: '已跳过', color: 'text-gray-400', bg: 'bg-gray-500/20', icon: '⏭️' };
+      return { text: 'Skipped', color: 'text-gray-400', bg: 'bg-gray-500/20', icon: '⏭️' };
     }
     if (record.status === 'executed' || (record.kalshi_success && record.polymarket_success)) {
-      return { text: '成功', color: 'text-green-400', bg: 'bg-green-500/20', icon: '✅' };
+      return { text: 'Succeeded', color: 'text-green-400', bg: 'bg-green-500/20', icon: '✅' };
     } else if (record.status === 'partial' || (record.kalshi_success !== record.polymarket_success)) {
-      return { text: '部分成功', color: 'text-yellow-400', bg: 'bg-yellow-500/20', icon: '⚠️' };
+      return { text: 'Partially Succeeded', color: 'text-yellow-400', bg: 'bg-yellow-500/20', icon: '⚠️' };
     } else {
-      return { text: '失败', color: 'text-red-400', bg: 'bg-red-500/20', icon: '❌' };
+      return { text: 'Failed', color: 'text-red-400', bg: 'bg-red-500/20', icon: '❌' };
     }
   };
 
   return (
     <div className="h-full flex flex-col p-2 space-y-2 overflow-hidden">
-      {/* 标题/工具栏 */}
+      {/* Header and toolbar */}
       <div className="flex justify-between items-center flex-shrink-0 pb-1 border-b border-[--border-color]">
         <div className="flex items-center gap-2">
           <button
@@ -158,7 +158,7 @@ export function ArbitrageHistory({ apiBaseUrl, onOpenExplorer }: ArbitrageHistor
                 : 'text-[--text-muted] hover:text-[--text-secondary]'
             }`}
           >
-            📊 追踪记录
+            📊 Tracking History
           </button>
           <button
             onClick={() => setActiveTab('trades')}
@@ -168,7 +168,7 @@ export function ArbitrageHistory({ apiBaseUrl, onOpenExplorer }: ArbitrageHistor
                 : 'text-[--text-muted] hover:text-[--text-secondary]'
             }`}
           >
-            🤖 下单记录
+            🤖 Order History
             {autoTradeRecords.length > 0 && (
               <span className="bg-[--accent-green] text-black text-[8px] px-1 rounded-full">
                 {autoTradeRecords.length}
@@ -181,20 +181,20 @@ export function ArbitrageHistory({ apiBaseUrl, onOpenExplorer }: ArbitrageHistor
             onClick={onOpenExplorer}
             className="text-[10px] px-2 py-0.5 bg-[--accent-purple]/10 text-[--accent-purple] rounded hover:bg-[--accent-purple]/20 transition-colors flex items-center gap-1"
           >
-            <span>🔍</span> 高级搜索
+            <span>🔍</span> Advanced Search
           </button>
         )}
       </div>
 
       <div className="flex-1 overflow-y-auto space-y-3 pr-1">
-        {/* 自动下单记录 */}
+        {/* Automated trading history */}
         {activeTab === 'trades' && (
           <div>
             {autoTradeRecords.length === 0 ? (
               <div className="text-center text-[--text-muted] py-8">
                 <div className="text-2xl mb-2">🤖</div>
-                <div className="text-xs">暂无自动下单记录</div>
-                <div className="text-[10px] mt-1">开启自动下单后，执行记录将显示在这里</div>
+                <div className="text-xs">No automated trading history</div>
+                <div className="text-[10px] mt-1">Execution records will appear here after automated trading is enabled</div>
               </div>
             ) : (
               <div className="space-y-1.5">
@@ -224,11 +224,11 @@ export function ArbitrageHistory({ apiBaseUrl, onOpenExplorer }: ArbitrageHistor
                       <div className="flex justify-between items-center text-[10px] text-[--text-muted] mt-1">
                         {isSkipped ? (
                           <span className="text-gray-400 truncate max-w-[180px]" title={record.skip_reason}>
-                            {record.skip_reason || '未知原因'}
+                            {record.skip_reason || 'Unknown reason'}
                           </span>
                         ) : (
                           <span>
-                            K:{record.kalshi_contracts}合约 P:${record.polymarket_amount.toFixed(2)}
+                            K:{record.kalshi_contracts} contracts P:${record.polymarket_amount.toFixed(2)}
                             {(record.kalshi_latency_ms || record.poly_latency_ms) && (
                               <span className="text-[--text-muted] ml-1" title={`Kalshi: ${record.kalshi_latency_ms}ms, Poly: ${record.poly_latency_ms}ms`}>
                                 ⏱️K:{record.kalshi_latency_ms || '-'}ms P:{record.poly_latency_ms || '-'}ms
@@ -248,12 +248,12 @@ export function ArbitrageHistory({ apiBaseUrl, onOpenExplorer }: ArbitrageHistor
 
         {activeTab === 'tracking' && (
           <>
-        {/* 活跃套利 */}
+        {/* Active arbitrage */}
         {data?.active?.length > 0 && (
           <div>
             <div className="text-[10px] font-medium text-[--accent-green] mb-1 flex items-center gap-1 sticky top-0 z-10 py-1">
               <span className="status-dot status-connected animate-pulse-dot w-1.5 h-1.5"></span>
-              进行中 ({data.active.length})
+              Active ({data.active.length})
             </div>
             <div className="space-y-1">
               {data.active.map((record, idx) => (
@@ -278,14 +278,14 @@ export function ArbitrageHistory({ apiBaseUrl, onOpenExplorer }: ArbitrageHistor
           </div>
         )}
 
-        {/* 历史套利 */}
+        {/* Historical arbitrage */}
         <div>
           <div className="text-[10px] font-medium text-[--text-secondary] mb-1 sticky top-0 z-10 py-1 flex justify-between items-center">
-             <span>已完成 ({data?.completed?.length || 0})</span>
+             <span>Completed ({data?.completed?.length || 0})</span>
           </div>
           {(!data?.completed || data.completed.length === 0) ? (
             <div className="text-center text-[--text-muted] py-4">
-              <div className="text-xs">暂无历史记录</div>
+              <div className="text-xs">No historical records</div>
             </div>
           ) : (
             <div className="space-y-1">
@@ -316,7 +316,7 @@ export function ArbitrageHistory({ apiBaseUrl, onOpenExplorer }: ArbitrageHistor
         )}
       </div>
 
-      {/* 详情弹窗 */}
+      {/* Details modal */}
       {selectedRecord && (
         <div 
           className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 backdrop-blur-sm"
@@ -373,7 +373,7 @@ export function ArbitrageHistory({ apiBaseUrl, onOpenExplorer }: ArbitrageHistor
               )}
             </div>
 
-            {/* 利润历史图表（简化版） */}
+            {/* Simplified profit history chart */}
             {selectedRecord.profit_history && selectedRecord.profit_history.length > 0 && (
               <div className="mt-4 pt-3 border-t border-[--border-color]">
                 <div className="text-[10px] text-[--text-muted] mb-2">Profit History ({selectedRecord.profit_history.length} points)</div>
@@ -397,7 +397,7 @@ export function ArbitrageHistory({ apiBaseUrl, onOpenExplorer }: ArbitrageHistor
         </div>
       )}
 
-      {/* 自动下单详情弹窗 */}
+      {/* Automated order details modal */}
       {selectedAutoTrade && (
         <div 
           className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 backdrop-blur-sm"
@@ -411,7 +411,7 @@ export function ArbitrageHistory({ apiBaseUrl, onOpenExplorer }: ArbitrageHistor
               <div>
                 <div className="flex items-center gap-2">
                   <span className="text-base">🤖</span>
-                  <h3 className="text-base font-semibold text-[--text-primary]">自动下单详情</h3>
+                  <h3 className="text-base font-semibold text-[--text-primary]">Automated Order Details</h3>
                 </div>
                 <div className="text-xs text-[--text-muted] mt-1">{selectedAutoTrade.event_name}</div>
                 <div className="text-[--accent-yellow] text-xs">{selectedAutoTrade.team_name}</div>
@@ -424,58 +424,58 @@ export function ArbitrageHistory({ apiBaseUrl, onOpenExplorer }: ArbitrageHistor
               </button>
             </div>
 
-            {/* 状态和利润 */}
+            {/* Status and profit */}
             <div className="grid grid-cols-2 gap-3 mb-4">
               <div className={`rounded p-2.5 ${getTradeStatus(selectedAutoTrade).bg}`}>
-                <div className="text-[10px] text-[--text-muted] mb-1">下单状态</div>
+                <div className="text-[10px] text-[--text-muted] mb-1">Order Status</div>
                 <div className={`text-lg font-bold ${getTradeStatus(selectedAutoTrade).color}`}>
                   {getTradeStatus(selectedAutoTrade).icon} {getTradeStatus(selectedAutoTrade).text}
                 </div>
               </div>
               <div className="bg-[--bg-tertiary] rounded p-2.5">
-                <div className="text-[10px] text-[--text-muted] mb-1">利润率</div>
+                <div className="text-[10px] text-[--text-muted] mb-1">Profit Margin</div>
                 <div className="text-lg font-bold text-[--accent-green] tabular-nums">
                   {selectedAutoTrade.profit_margin.toFixed(2)}%
                 </div>
               </div>
             </div>
 
-            {/* 跳过原因（如果有） */}
+            {/* Skip reason, if any */}
             {selectedAutoTrade.status === 'skipped' && selectedAutoTrade.skip_reason && (
               <div className="mb-4 p-3 bg-gray-500/10 border border-gray-500/30 rounded">
-                <div className="text-[10px] text-gray-400 mb-1">⚠️ 跳过原因</div>
+                <div className="text-[10px] text-gray-400 mb-1">⚠️ Skip Reason</div>
                 <div className="text-sm text-gray-300">{selectedAutoTrade.skip_reason}</div>
               </div>
             )}
 
-            {/* Kalshi 订单详情 */}
+            {/* Kalshi order details */}
             <div className="mb-3 p-2.5 bg-[--bg-tertiary] rounded">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs font-semibold text-blue-400">Kalshi</span>
                 <span className={`text-[10px] px-1.5 py-0.5 rounded ${selectedAutoTrade.kalshi_success ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
-                  {selectedAutoTrade.kalshi_success ? '成功' : '失败'}
+                  {selectedAutoTrade.kalshi_success ? 'Succeeded' : 'Failed'}
                 </span>
               </div>
               <div className="space-y-1 text-xs">
                 <div className="flex justify-between">
-                  <span className="text-[--text-muted]">方向</span>
+                  <span className="text-[--text-muted]">Side</span>
                   <span className="text-[--text-primary]">{selectedAutoTrade.kalshi_side.toUpperCase()}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-[--text-muted]">合约数量</span>
+                  <span className="text-[--text-muted]">Contracts</span>
                   <span className="text-[--text-primary] tabular-nums">{selectedAutoTrade.kalshi_contracts}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-[--text-muted]">价格</span>
+                  <span className="text-[--text-muted]">Price</span>
                   <span className="text-[--text-primary] tabular-nums">{(selectedAutoTrade.kalshi_price * 100).toFixed(0)}¢</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-[--text-muted]">手续费</span>
+                  <span className="text-[--text-muted]">Fee</span>
                   <span className="text-[--text-primary] tabular-nums">${selectedAutoTrade.kalshi_fee.toFixed(2)}</span>
                 </div>
                 {selectedAutoTrade.kalshi_order_id && (
                   <div className="flex justify-between">
-                    <span className="text-[--text-muted]">订单ID</span>
+                    <span className="text-[--text-muted]">Order ID</span>
                     <span className="text-[--text-primary] text-[10px] font-mono truncate max-w-[150px]">{selectedAutoTrade.kalshi_order_id}</span>
                   </div>
                 )}
@@ -485,30 +485,30 @@ export function ArbitrageHistory({ apiBaseUrl, onOpenExplorer }: ArbitrageHistor
               </div>
             </div>
 
-            {/* Polymarket 订单详情 */}
+            {/* Polymarket order details */}
             <div className="mb-3 p-2.5 bg-[--bg-tertiary] rounded">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs font-semibold text-purple-400">Polymarket</span>
                 <span className={`text-[10px] px-1.5 py-0.5 rounded ${selectedAutoTrade.polymarket_success ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
-                  {selectedAutoTrade.polymarket_success ? '成功' : '失败'}
+                  {selectedAutoTrade.polymarket_success ? 'Succeeded' : 'Failed'}
                 </span>
               </div>
               <div className="space-y-1 text-xs">
                 <div className="flex justify-between">
-                  <span className="text-[--text-muted]">方向</span>
+                  <span className="text-[--text-muted]">Side</span>
                   <span className="text-[--text-primary]">{selectedAutoTrade.polymarket_side.toUpperCase()}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-[--text-muted]">金额</span>
+                  <span className="text-[--text-muted]">Amount</span>
                   <span className="text-[--text-primary] tabular-nums">${selectedAutoTrade.polymarket_amount.toFixed(4)}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-[--text-muted]">价格</span>
+                  <span className="text-[--text-muted]">Price</span>
                   <span className="text-[--text-primary] tabular-nums">{(selectedAutoTrade.polymarket_price * 100).toFixed(2)}¢</span>
                 </div>
                 {selectedAutoTrade.polymarket_order_id && (
                   <div className="flex justify-between">
-                    <span className="text-[--text-muted]">订单ID</span>
+                    <span className="text-[--text-muted]">Order ID</span>
                     <span className="text-[--text-primary] text-[10px] font-mono truncate max-w-[150px]">{selectedAutoTrade.polymarket_order_id}</span>
                   </div>
                 )}
@@ -518,30 +518,30 @@ export function ArbitrageHistory({ apiBaseUrl, onOpenExplorer }: ArbitrageHistor
               </div>
             </div>
 
-            {/* 其他信息 */}
+            {/* Other information */}
             <div className="space-y-1.5 text-xs border-t border-[--border-color] pt-3">
               <div className="flex justify-between">
-                <span className="text-[--text-muted]">总金额</span>
+                <span className="text-[--text-muted]">Total Amount</span>
                 <span className="text-[--text-primary] tabular-nums">${selectedAutoTrade.total_amount.toFixed(2)}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-[--text-muted]">机会持续时间</span>
+                <span className="text-[--text-muted]">Opportunity Duration</span>
                 <span className="text-[--text-primary] tabular-nums">{(selectedAutoTrade.duration_ms / 1000).toFixed(1)}s</span>
               </div>
               {selectedAutoTrade.total_duration_ms > 0 && (
                 <>
                   <div className="flex justify-between">
-                    <span className="text-[--text-muted]">下单总耗时</span>
+                    <span className="text-[--text-muted]">Total Order Duration</span>
                     <span className="text-[--text-primary] tabular-nums">{(selectedAutoTrade.total_duration_ms / 1000).toFixed(1)}s</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-[--text-muted]">API延迟 (Kalshi)</span>
+                    <span className="text-[--text-muted]">API Latency (Kalshi)</span>
                     <span className="text-[--text-primary] tabular-nums">
                       {selectedAutoTrade.kalshi_latency_ms ? `${selectedAutoTrade.kalshi_latency_ms}ms` : '-'}
                     </span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-[--text-muted]">API延迟 (Poly)</span>
+                    <span className="text-[--text-muted]">API Latency (Poly)</span>
                     <span className="text-[--text-primary] tabular-nums">
                       {selectedAutoTrade.poly_latency_ms ? `${selectedAutoTrade.poly_latency_ms}ms` : '-'}
                     </span>
@@ -549,7 +549,7 @@ export function ArbitrageHistory({ apiBaseUrl, onOpenExplorer }: ArbitrageHistor
                 </>
               )}
               <div className="flex justify-between">
-                <span className="text-[--text-muted]">执行时间</span>
+                <span className="text-[--text-muted]">Execution Time</span>
                 <span className="text-[--text-primary]">{formatDate(selectedAutoTrade.created_at)} {formatTime(selectedAutoTrade.created_at)}</span>
               </div>
             </div>

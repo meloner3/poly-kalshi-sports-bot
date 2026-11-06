@@ -1,4 +1,4 @@
-# Rust 编译产物
+# Rust build artifacts
 target/
 **/*.rs.bk
 *.pdb
@@ -6,13 +6,13 @@ target/
 # Cargo
 Cargo.lock
 
-# 数据库文件（运行时生成）
+# Database files (generated at runtime)
 *.db
 *.db-shm
 *.db-wal
 arbitrage_history.db
 
-# 配置文件（包含敏感信息，使用符号链接）
+# Configuration files (contain sensitive information; use symlinks)
 config.toml
 # IDE
 .vscode/
@@ -21,22 +21,22 @@ config.toml
 *.swo
 *~
 
-# 日志文件
+# Log files
 *.log
 logs/
 
-# 环境变量
+# Environment variables
 .env
 .env.local
 
-# 操作系统文件
+# Operating-system files
 .DS_Store
 Thumbs.db
 
-# 临时文件
+# Temporary files
 *.tmp
 *.bak
 *.orig
 
-# 前端静态文件（构建时复制）
+# Frontend static files (copied during build)
 static/

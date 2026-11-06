@@ -9,15 +9,16 @@ import { OrderPanel } from './components/OrderPanel';
 import { OrderForm } from './components/OrderForm';
 import { MetricsPanel } from './components/MetricsPanel';
 import { PolyDebugOrder } from './components/PolyDebugOrder';
+import { MentionSignalsPanel } from './components/MentionSignalsPanel';
 import { useWebSocket } from './hooks/useWebSocket';
 import { MatchedMarketData, OrderbookDepthResponse } from './types';
 
 function App() {
-  // 登录状态管理
+  // Authentication state
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [currentUsername, setCurrentUsername] = useState<string | null>(null);
 
-  // 初始化时检查 localStorage 中的 token
+  // Check localStorage for a token on initialization.
   useEffect(() => {
     const token = localStorage.getItem('auth_token');
     const username = localStorage.getItem('username');
@@ -27,7 +28,7 @@ function App() {
     }
   }, []);
 
-  // 登录成功处理
+  // Handle successful login.
   const handleLoginSuccess = (token: string, username: string) => {
     localStorage.setItem('auth_token', token);
     localStorage.setItem('username', username);
@@ -35,7 +36,7 @@ function App() {
     setCurrentUsername(username);
   };
 
-  // 退出登录
+  // Log out.
   const handleLogout = () => {
     localStorage.removeItem('auth_token');
     localStorage.removeItem('username');
@@ -59,31 +60,33 @@ function App() {
       : `${window.location.protocol}//${window.location.host}`;
   }, []);
   
-  const { matchedMarkets, isConnected, stats, lastUpdateTime, updateCount, dataCoverage, metrics } = useWebSocket(wsUrl);
-  // 从匹配市场计算总利润（只计算有套利机会的市场）
+  const { matchedMarkets, isConnected, stats, lastUpdateTime, updateCount, dataCoverage, metrics, mentionSignals, mentionStatus } = useWebSocket(wsUrl);
+  // Calculate total profit from matched markets with arbitrage opportunities.
   const totalProfit = matchedMarkets
     .filter(m => m.has_opportunity)
     .reduce((sum, m) => sum + m.expected_profit, 0);
-  const [selectedMarket, setSelectedMarket] = useState<MatchedMarketData | null>(null);
-  const [rightPanelTab, setRightPanelTab] = useState<'detail' | 'tracking'>('detail');
+  const [selectedMarketKey, setSelectedMarketKey] = useState<string | null>(null);
+  const selectedMarket = useMemo(() => {
+    if (selectedMarketKey === null) {
+      return null;
+    }
+    return matchedMarkets.find(
+      (market) =>
+        `${market.kalshi_market_id}_${market.polymarket_market_id}` === selectedMarketKey,
+    ) ?? null;
+  }, [matchedMarkets, selectedMarketKey]);
+  const [rightPanelTab, setRightPanelTab] = useState<'detail' | 'tracking' | 'mention'>('detail');
   const [leftBottomTab, setLeftBottomTab] = useState<'positions' | 'history'>('positions');
   const [showHistoryExplorer, setShowHistoryExplorer] = useState(false);
   const [showPolyDebug, setShowPolyDebug] = useState(false);
   const [orderbookDepth, setOrderbookDepth] = useState<OrderbookDepthResponse | null>(null);
 
-  // 获取订单簿深度
+  // Fetch order book depth.
   const fetchOrderbookDepth = useCallback(async (market: MatchedMarketData) => {
     try {
       const params = new URLSearchParams();
       if (market.kalshi_market_id) {
         params.append('kalshi_ticker', market.kalshi_market_id);
-      }
-      // Polymarket: Yes 深度用 own token，No 深度用 opponent token
-      if (market.poly_token_id) {
-        params.append('poly_token_id', market.poly_token_id);
-      }
-      if (market.poly_opponent_token_id) {
-        params.append('poly_opponent_token_id', market.poly_opponent_token_id);
       }
       const response = await fetch(`${apiBaseUrl}/api/orderbook/depth?${params}`);
       if (response.ok) {
@@ -91,15 +94,15 @@ function App() {
         setOrderbookDepth(data);
       }
     } catch (error) {
-      console.error('获取订单簿深度失败:', error);
+      console.error('Failed to fetch order book depth:', error);
     }
   }, [apiBaseUrl]);
 
-  // 选中市场变化时获取深度
+  // Fetch depth when the selected market changes.
   useEffect(() => {
     if (selectedMarket) {
       fetchOrderbookDepth(selectedMarket);
-      // 每 3 秒刷新一次深度
+      // Refresh depth every three seconds.
       const interval = setInterval(() => fetchOrderbookDepth(selectedMarket), 3000);
       return () => clearInterval(interval);
     } else {
@@ -107,7 +110,7 @@ function App() {
     }
   }, [selectedMarket, fetchOrderbookDepth]);
 
-  // 未登录时显示登录页面
+  // Show the login page when unauthenticated.
   if (!isAuthenticated) {
     return <Login onLoginSuccess={handleLoginSuccess} apiBaseUrl={apiBaseUrl} />;
   }
@@ -128,19 +131,23 @@ function App() {
       />
       
       <main className="flex-1 flex overflow-hidden gap-1 p-1 bg-[--bg-primary]">
-        {/* 左侧：市场列表 + 持仓/历史记录 */}
+        {/* Left: market list and positions/history */}
         <div className="flex-1 flex flex-col overflow-hidden gap-1">
-          {/* 上部：市场列表 (55%) */}
+          {/* Top: market list (55%) */}
           <div className="flex-1 min-h-0 overflow-hidden flex flex-col bg-[--bg-secondary] rounded border border-[--border-color] shadow-lg" style={{flexBasis: '55%'}}>
             <OpportunityList 
               matchedMarkets={matchedMarkets}
-              onSelectMarket={setSelectedMarket}
+              onSelectMarket={(market) =>
+                setSelectedMarketKey(
+                  `${market.kalshi_market_id}_${market.polymarket_market_id}`,
+                )
+              }
               apiBaseUrl={apiBaseUrl}
             />
           </div>
-          {/* 下部：持仓/历史记录标签页 (45%) */}
+          {/* Bottom: positions/history tabs (45%) */}
           <div className="flex-1 min-h-0 overflow-hidden flex flex-col bg-[--bg-secondary] rounded border border-[--border-color] shadow-lg" style={{flexBasis: '45%'}}>
-            {/* 标签页切换 */}
+            {/* Tab switcher */}
             <div className="flex border-b-2 border-[--border-color] flex-shrink-0 bg-[--bg-tertiary]">
               <button
                 className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors border-b-2 ${
@@ -150,7 +157,7 @@ function App() {
                 }`}
                 onClick={() => setLeftBottomTab('positions')}
               >
-                💼 持仓
+                💼 Positions
               </button>
               <button
                 className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors border-b-2 ${
@@ -160,11 +167,11 @@ function App() {
                 }`}
                 onClick={() => setLeftBottomTab('history')}
               >
-                📜 套利记录
+                📜 Arbitrage History
               </button>
             </div>
             
-            {/* 标签页内容 */}
+            {/* Tab content */}
             <div className="flex-1 overflow-hidden">
               {leftBottomTab === 'positions' ? (
                 <OrderPanel apiBaseUrl={apiBaseUrl} />
@@ -175,11 +182,11 @@ function App() {
           </div>
         </div>
         
-        {/* 右侧面板：详细信息/追踪 + 性能 */}
+        {/* Right: details/tracking and performance */}
         <aside className="w-96 flex-shrink-0 flex flex-col gap-1">
-          {/* 上部：标签页区域 (70%) */}
+          {/* Top: tab area (70%) */}
           <div className="flex-1 min-h-0 flex flex-col bg-[--bg-secondary] rounded border border-[--border-color] shadow-lg" style={{flexBasis: '70%'}}>
-            {/* 标签页切换 */}
+            {/* Tab switcher */}
             <div className="flex border-b-2 border-[--border-color] flex-shrink-0 bg-[--bg-tertiary]">
               <button
                 className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors border-b-2 ${
@@ -189,7 +196,7 @@ function App() {
                 }`}
                 onClick={() => setRightPanelTab('detail')}
               >
-                📋 详情
+                📋 Details
               </button>
               <button
                 className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors border-b-2 ${
@@ -199,23 +206,33 @@ function App() {
                 }`}
                 onClick={() => setRightPanelTab('tracking')}
               >
-                🎯 追踪
+                🎯 Tracking
+              </button>
+              <button
+                className={`flex-1 px-2 py-1.5 text-[10px] font-medium transition-colors border-b-2 ${
+                  rightPanelTab === 'mention'
+                    ? 'text-amber-300 border-amber-300 bg-[--bg-secondary]'
+                    : 'text-[--text-muted] hover:text-[--text-secondary] border-transparent'
+                }`}
+                onClick={() => setRightPanelTab('mention')}
+              >
+                Mention
               </button>
             </div>
 
-            {/* 标签页内容 */}
+            {/* Tab content */}
             <div className="flex-1 overflow-y-auto overflow-x-hidden">
               {rightPanelTab === 'detail' ? (
                 selectedMarket ? (
                   <div className="p-2 space-y-2">
-                      {/* 标题栏 */}
+                      {/* Header */}
                       <div className="pb-1.5 border-b border-[--border-color]">
-                        <h3 className="text-[10px] font-semibold text-[--text-muted] uppercase tracking-wider">市场详情</h3>
+                        <h3 className="text-[10px] font-semibold text-[--text-muted] uppercase tracking-wider">Market Details</h3>
                       </div>
                       
-                      {/* 事件信息 - 紧凑卡片 */}
+                      {/* Event information */}
                       <div className="bg-[--bg-tertiary] rounded p-2">
-                        <div className="text-[10px] text-[--text-muted] mb-1">事件</div>
+                        <div className="text-[10px] text-[--text-muted] mb-1">Event</div>
                         <div className="text-xs text-[--text-primary] font-medium leading-tight">
                           {selectedMarket.event_name}
                         </div>
@@ -232,11 +249,11 @@ function App() {
                         )}
                       </div>
 
-                      {/* 数据状态 + 利润信息 - 合并显示 */}
+                      {/* Data status and profit information */}
                       <div className="grid grid-cols-2 gap-1.5">
-                        {/* 数据状态 */}
+                        {/* Data status */}
                         <div className="bg-[--bg-tertiary] rounded p-1.5">
-                          <div className="text-[10px] text-[--text-muted] mb-1.5">数据状态</div>
+                          <div className="text-[10px] text-[--text-muted] mb-1.5">Data Status</div>
                           <div className="flex flex-col gap-1">
                             <span className={`px-1.5 py-0.5 rounded text-[10px] ${selectedMarket.kalshi_ready ? 'bg-blue-500/20 text-blue-400' : 'bg-gray-500/20 text-gray-400'}`}>
                               Kalshi {selectedMarket.kalshi_ready ? '✓' : '○'}
@@ -247,31 +264,31 @@ function App() {
                           </div>
                         </div>
 
-                        {/* 利润信息 */}
+                        {/* Profit information */}
                         {selectedMarket.has_opportunity ? (
                           <div className="bg-gradient-to-br from-green-500/10 to-emerald-500/5 rounded p-1.5 border border-green-500/20">
-                            <div className="text-[10px] text-[--text-muted] mb-1">套利机会</div>
+                            <div className="text-[10px] text-[--text-muted] mb-1">Arbitrage Opportunity</div>
                             <div className="text-base font-bold text-[--accent-green] leading-tight">
                               {selectedMarket.profit_margin.toFixed(2)}%
                             </div>
                             <div className="text-[10px] text-green-400 mt-0.5">
-                              净利润: ${selectedMarket.expected_profit.toFixed(2)}
+                              Net Profit: ${selectedMarket.expected_profit.toFixed(2)}
                             </div>
                           </div>
                         ) : (
                           <div className="bg-[--bg-tertiary] rounded p-1.5 border border-gray-500/20">
-                            <div className="text-[10px] text-[--text-muted] mb-1">套利结果</div>
+                            <div className="text-[10px] text-[--text-muted] mb-1">Arbitrage Result</div>
                             <div className="text-base font-bold text-gray-400 leading-tight">
                               {selectedMarket.profit_margin.toFixed(2)}%
                             </div>
                             <div className="text-[10px] text-gray-400 mt-0.5">
-                              净利润: ${selectedMarket.expected_profit.toFixed(2)}
+                              Net Profit: ${selectedMarket.expected_profit.toFixed(2)}
                             </div>
                           </div>
                         )}
                       </div>
 
-                      {/* 价格与深度 - 两平台并排 */}
+                      {/* Prices and depth side by side */}
                       <div className="grid grid-cols-2 gap-2">
                         {/* Kalshi */}
                         <div className="bg-[--bg-tertiary] rounded p-2">
@@ -364,43 +381,43 @@ function App() {
                         </div>
                       </div>
 
-                      {/* 套利计算详情 - 始终显示 */}
+                      {/* Arbitrage calculation details */}
                       <div className="bg-[--bg-tertiary] rounded p-2 space-y-1.5">
                         {selectedMarket.arbitrage_type && (
                           <div>
-                            <div className="text-[10px] text-[--text-muted] mb-1">套利策略</div>
+                            <div className="text-[10px] text-[--text-muted] mb-1">Arbitrage Strategy</div>
                             <div className={`text-xs font-mono ${selectedMarket.has_opportunity ? 'text-[--text-primary]' : 'text-gray-400'}`}>
                               {selectedMarket.arbitrage_type}
                             </div>
                           </div>
                         )}
                         
-                        {/* 费用明细 */}
+                        {/* Fee breakdown */}
                         <div className={selectedMarket.arbitrage_type ? 'pt-2 border-t border-[--border-color]' : ''}>
-                          <div className="text-[10px] text-[--text-muted] mb-1.5">套利计算详情</div>
+                          <div className="text-[10px] text-[--text-muted] mb-1.5">Arbitrage Calculation Details</div>
                           <div className="space-y-1 text-[10px]">
                             {selectedMarket.kalshi_contracts !== undefined && (
                               <div className="flex justify-between">
-                                <span className="text-[--text-muted]">Kalshi 合约数</span>
+                                <span className="text-[--text-muted]">Kalshi Contracts</span>
                                 <span className="text-blue-400 font-mono">{Math.round(selectedMarket.kalshi_contracts)}</span>
                               </div>
                             )}
                             {selectedMarket.kalshi_fee !== undefined && (
                               <div className="flex justify-between">
-                                <span className="text-[--text-muted]">Kalshi 手续费</span>
+                                <span className="text-[--text-muted]">Kalshi Fee</span>
                                 <span className="text-orange-400 font-mono">-${selectedMarket.kalshi_fee.toFixed(2)}</span>
                               </div>
                             )}
                             {selectedMarket.gross_profit !== undefined && (
                               <div className="flex justify-between">
-                                <span className="text-[--text-muted]">毛利润</span>
+                                <span className="text-[--text-muted]">Gross Profit</span>
                                 <span className={`font-mono ${selectedMarket.gross_profit >= 0 ? 'text-[--text-secondary]' : 'text-red-400'}`}>
                                   ${selectedMarket.gross_profit.toFixed(2)}
                                 </span>
                               </div>
                             )}
                             <div className="flex justify-between pt-1 border-t border-[--border-color]">
-                              <span className="text-[--text-muted] font-medium">净利润</span>
+                              <span className="text-[--text-muted] font-medium">Net Profit</span>
                               <span className={`font-mono font-medium ${selectedMarket.expected_profit >= 0 ? (selectedMarket.has_opportunity ? 'text-green-400' : 'text-gray-400') : 'text-red-400'}`}>
                                 ${selectedMarket.expected_profit.toFixed(2)}
                               </span>
@@ -409,10 +426,10 @@ function App() {
                         </div>
                       </div>
 
-                      {/* 下单区域 */}
+                      {/* Order area */}
                       <div className="pt-1.5 border-t border-[--border-color]">
                         <div className="pb-1.5">
-                          <h3 className="text-[10px] font-semibold text-[--text-muted] uppercase tracking-wider">交易下单</h3>
+                          <h3 className="text-[10px] font-semibold text-[--text-muted] uppercase tracking-wider">Place Order</h3>
                         </div>
                         <OrderForm 
                           market={selectedMarket} 
@@ -423,24 +440,26 @@ function App() {
                 ) : (
                   <div className="flex flex-col items-center justify-center h-full">
                     <div className="text-3xl mb-2">👆</div>
-                    <div className="text-xs text-[--text-secondary]">选择一个市场</div>
-                    <div className="text-[10px] text-[--text-muted] mt-1">查看详细信息和交易</div>
+                    <div className="text-xs text-[--text-secondary]">Select a market</div>
+                    <div className="text-[10px] text-[--text-muted] mt-1">View details and place trades</div>
                   </div>
                 )
-              ) : (
+              ) : rightPanelTab === 'tracking' ? (
                 <TrackingPanel apiBaseUrl={apiBaseUrl} />
+              ) : (
+                <MentionSignalsPanel apiBaseUrl={apiBaseUrl} signals={mentionSignals} status={mentionStatus} />
               )}
             </div>
           </div>
           
-          {/* 下部：性能监控 (30%) */}
+          {/* Bottom: performance monitoring (30%) */}
           <div className="flex-1 min-h-0 overflow-hidden flex flex-col bg-[--bg-secondary] rounded border border-[--border-color] shadow-lg" style={{flexBasis: '30%'}}>
             <MetricsPanel metrics={metrics} />
           </div>
         </aside>
       </main>
 
-      {/* 历史探索弹窗 */}
+      {/* History explorer modal */}
       {showHistoryExplorer && (
         <HistoryExplorer 
           apiBaseUrl={apiBaseUrl} 
@@ -448,7 +467,7 @@ function App() {
         />
       )}
 
-      {/* Polymarket 调试下单弹窗 */}
+      {/* Polymarket debug order modal */}
       {showPolyDebug && (
         <PolyDebugOrder
           apiBaseUrl={apiBaseUrl}
@@ -456,11 +475,11 @@ function App() {
         />
       )}
 
-      {/* 调试按钮 - 固定在右下角 */}
+      {/* Debug button fixed to the bottom right */}
       <button
         onClick={() => setShowPolyDebug(true)}
         className="fixed bottom-4 right-4 w-12 h-12 rounded-full bg-purple-500 hover:bg-purple-600 text-white shadow-lg flex items-center justify-center text-xl z-40"
-        title="Poly 手动下单调试"
+        title="Polymarket Manual Order Debug"
       >
         🔧
       </button>
@@ -475,32 +494,32 @@ function formatDateTime(dateString: string): string {
   const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
   const diffMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
   
-  // 格式化日期时间
-  const dateStr = date.toLocaleDateString('zh-CN', { 
+  // Format date and time.
+  const dateStr = date.toLocaleDateString('en-US', {
     month: '2-digit', 
     day: '2-digit',
     weekday: 'short'
   });
-  const timeStr = date.toLocaleTimeString('zh-CN', { 
+  const timeStr = date.toLocaleTimeString('en-US', {
     hour: '2-digit', 
     minute: '2-digit',
     hour12: false
   });
   
-  // 如果在24小时内，显示倒计时
+  // Show a countdown for events within 24 hours.
   if (diffMs > 0 && diffHours < 24) {
     if (diffHours > 0) {
-      return `${dateStr} ${timeStr} (${diffHours}小时${diffMinutes}分钟后)`;
+      return `${dateStr} ${timeStr} (in ${diffHours}h ${diffMinutes}m)`;
     } else if (diffMinutes > 0) {
-      return `${dateStr} ${timeStr} (${diffMinutes}分钟后)`;
+      return `${dateStr} ${timeStr} (in ${diffMinutes}m)`;
     } else {
-      return `${dateStr} ${timeStr} (即将开始)`;
+      return `${dateStr} ${timeStr} (starting soon)`;
     }
   }
   
-  // 如果已经过去
+  // Indicate events that have already started.
   if (diffMs < 0) {
-    return `${dateStr} ${timeStr} (已开始)`;
+    return `${dateStr} ${timeStr} (started)`;
   }
   
   return `${dateStr} ${timeStr}`;

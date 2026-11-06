@@ -29,7 +29,7 @@ pub async fn ws_handler(
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
 
-    info!("新的 WebSocket 客户端已连接");
+    info!("New WebSocket client connected");
 
     // Create channel for outgoing messages
     let (tx, mut rx) = mpsc::channel::<String>(100);
@@ -37,7 +37,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     // Send initial data
     {
         let service = state.service.read().await;
-        
+
         // Send matched markets list (key message for frontend)
         let markets = service.ws_manager.get_matched_markets_for_frontend();
         let opportunities_count = markets.iter().filter(|m| m.has_opportunity).count();
@@ -60,10 +60,23 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         // Send current opportunities
         let opportunities = service.get_opportunities();
         if !opportunities.is_empty() {
-            let msg = WsMessage::Opportunities { data: opportunities };
+            let msg = WsMessage::Opportunities {
+                data: opportunities,
+            };
             if let Ok(json) = serde_json::to_string(&msg) {
                 let _ = tx.send(json).await;
             }
+        }
+
+        let status = state.directional_execution.status().unwrap_or_else(|error| {
+            serde_json::json!({"mode":"off","error":error.to_string()})
+        });
+        let message = WsMessage::MentionSignals {
+            data: state.directional_execution.signal_dashboard(),
+            status,
+        };
+        if let Ok(json) = serde_json::to_string(&message) {
+            let _ = tx.send(json).await;
         }
     }
 
@@ -82,17 +95,17 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         let mut interval = tokio::time::interval(Duration::from_secs(2));
         loop {
             interval.tick().await;
-            
+
             let service = state_clone.service.read().await;
             let markets = service.ws_manager.get_matched_markets_for_frontend();
             let opportunities_count = markets.iter().filter(|m| m.has_opportunity).count();
-            
+
             let msg = WsMessage::MatchedMarketsList {
                 data: markets.clone(),
                 count: markets.len(),
                 opportunities_count,
             };
-            
+
             if let Ok(json) = serde_json::to_string(&msg) {
                 if tx_periodic.send(json).await.is_err() {
                     break;
@@ -140,16 +153,36 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         let mut interval = tokio::time::interval(Duration::from_secs(10));
         loop {
             interval.tick().await;
-            
+
             let service = state_metrics.service.read().await;
             let report = service.metrics.report();
-            
+
             let msg = WsMessage::Metrics { data: report };
-            
+
             if let Ok(json) = serde_json::to_string(&msg) {
                 if tx_metrics.send(json).await.is_err() {
                     break;
                 }
+            }
+        }
+    });
+
+    let state_mentions = state.clone();
+    let tx_mentions = tx.clone();
+    let mention_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+            let executor = &state_mentions.directional_execution;
+            let status = executor.status().unwrap_or_else(|error| {
+                serde_json::json!({"mode":"off","error":error.to_string()})
+            });
+            let message = WsMessage::MentionSignals {
+                data: executor.signal_dashboard(),
+                status,
+            };
+            if let Ok(json) = serde_json::to_string(&message) {
+                if tx_mentions.send(json).await.is_err() { break; }
             }
         }
     });
@@ -174,7 +207,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     break;
                 }
                 Err(e) => {
-                    error!("WebSocket 错误: {}", e);
+                    error!("WebSocket error: {:#}", e);
                     break;
                 }
                 _ => {}
@@ -190,7 +223,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     opportunity_task.abort();
     scan_stats_task.abort();
     metrics_task.abort();
+    mention_task.abort();
     send_task.abort();
 
-    info!("WebSocket 客户端已断开连接");
+    info!("WebSocket client disconnected");
 }

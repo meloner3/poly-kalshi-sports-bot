@@ -6,6 +6,9 @@ __pycache__/
 *.so
 .Python
 venv/
+.env/
+.venv/
+poly-order-service/.venv/
 env/
 ENV/
 build/

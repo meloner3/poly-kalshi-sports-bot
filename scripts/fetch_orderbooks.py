@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-获取 Polymarket NBA 赛事的订单簿数据
-用于分析订单簿的排序和结构
+Fetch order-book data for Polymarket NBA events.
+Used to analyze order-book ordering and structure.
 """
 
 import requests
@@ -14,14 +14,14 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
 
 def get_nba_markets():
-    """获取所有 NBA 市场"""
-    print("📊 获取 NBA 市场列表...")
+    """Fetch all NBA markets."""
+    print("📊 Fetching the NBA market list...")
     
-    # 方法1: 通过搜索获取
+    # Method 1: Fetch through search.
     url = f"{GAMMA_API}/markets"
     params = {
         "limit": 100,
-        "closed": "false",  # 只要未关闭的
+        "closed": "false",  # Only open markets.
     }
     
     try:
@@ -29,34 +29,34 @@ def get_nba_markets():
         response.raise_for_status()
         all_markets = response.json()
     except Exception as e:
-        print(f"   ❌ 获取市场列表失败: {e}")
+        print(f"   ❌ Failed to fetch the market list: {e}")
         return []
     
-    # 过滤 NBA 市场
+    # Filter NBA markets.
     nba_markets = []
     for market in all_markets:
         question = market.get("question", "").lower()
         description = market.get("description", "").lower()
         tags = [tag.lower() for tag in market.get("tags", [])]
         
-        # 检查是否包含 NBA 相关关键词
+        # Check for NBA-related keywords.
         if any(keyword in question or keyword in description or keyword in str(tags) 
                for keyword in ["nba", "basketball", "lakers", "warriors", "celtics", "heat"]):
             nba_markets.append(market)
     
-    print(f"   找到 {len(nba_markets)} 个 NBA 相关市场")
+    print(f"   Found {len(nba_markets)} NBA-related markets")
     
-    # 如果没找到，尝试直接使用已知的 token_id（从你的日志中提取）
+    # If none are found, try known token IDs extracted from logs.
     if len(nba_markets) == 0:
-        print("   ℹ️  使用已知的 NBA token_id 进行测试...")
-        # 从你的日志中提取的 token_id
+        print("   ℹ️  Testing with known NBA token IDs...")
+        # Token IDs extracted from logs.
         test_tokens = [
             "94515776290373751754638142228993059501097351216445649452643423016914071837398",  # CHI-MIA
             "16215889044933102237616087156593010997453882627000153373435840826284741185376",  # CHI-MIA
             "103007116798336628661619679985222919791811823436106325887661137036158976283917", # NYK-POR
         ]
         
-        # 创建虚拟市场对象用于测试
+        # Create mock market objects for testing.
         for i, token_id in enumerate(test_tokens):
             nba_markets.append({
                 "question": f"Test NBA Market {i+1}",
@@ -67,7 +67,7 @@ def get_nba_markets():
     return nba_markets
 
 def get_orderbook(token_id):
-    """获取指定 token 的订单簿"""
+    """Fetch the order book for the specified token."""
     url = f"{CLOB_API}/book"
     params = {"token_id": token_id}
     
@@ -76,11 +76,11 @@ def get_orderbook(token_id):
         response.raise_for_status()
         return response.json()
     except Exception as e:
-        print(f"   ❌ 获取订单簿失败: {e}")
+        print(f"   ❌ Failed to fetch the order book: {e}")
         return None
 
 def analyze_orderbook(orderbook_data, token_id):
-    """分析订单簿数据"""
+    """Analyze order-book data."""
     if not orderbook_data:
         return None
     
@@ -96,9 +96,9 @@ def analyze_orderbook(orderbook_data, token_id):
         "asks": [],
     }
     
-    # 分析 bids
+    # Analyze bids.
     if bids:
-        for i, bid in enumerate(bids[:5]):  # 只取前5个
+        for i, bid in enumerate(bids[:5]):  # Use only the first five.
             price = float(bid.get("price", 0))
             size = float(bid.get("size", 0))
             analysis["bids"].append({
@@ -108,7 +108,7 @@ def analyze_orderbook(orderbook_data, token_id):
                 "value": price * size
             })
         
-        # 检查排序
+        # Check ordering.
         prices = [float(b.get("price", 0)) for b in bids]
         is_ascending = all(prices[i] <= prices[i+1] for i in range(len(prices)-1))
         is_descending = all(prices[i] >= prices[i+1] for i in range(len(prices)-1))
@@ -117,9 +117,9 @@ def analyze_orderbook(orderbook_data, token_id):
         analysis["best_bid"] = {"price": prices[0], "position": "first"} if prices else None
         analysis["worst_bid"] = {"price": prices[-1], "position": "last"} if prices else None
     
-    # 分析 asks
+    # Analyze asks.
     if asks:
-        for i, ask in enumerate(asks[:5]):  # 只取前5个
+        for i, ask in enumerate(asks[:5]):  # Use only the first five.
             price = float(ask.get("price", 0))
             size = float(ask.get("size", 0))
             analysis["asks"].append({
@@ -129,7 +129,7 @@ def analyze_orderbook(orderbook_data, token_id):
                 "value": price * size
             })
         
-        # 检查排序
+        # Check ordering.
         prices = [float(a.get("price", 0)) for a in asks]
         is_ascending = all(prices[i] <= prices[i+1] for i in range(len(prices)-1))
         is_descending = all(prices[i] >= prices[i+1] for i in range(len(prices)-1))
@@ -142,29 +142,29 @@ def analyze_orderbook(orderbook_data, token_id):
 
 def main():
     print("=" * 60)
-    print("Polymarket NBA 订单簿数据采集")
+    print("Polymarket NBA Order-Book Data Collection")
     print("=" * 60)
     print()
     
-    # 创建输出目录
+    # Create the output directory.
     output_dir = Path("orderbook_analysis")
     output_dir.mkdir(exist_ok=True)
     
-    # 获取 NBA 市场
+    # Fetch NBA markets.
     markets = get_nba_markets()
     
     if not markets:
-        print("❌ 没有找到 NBA 市场")
+        print("❌ No NBA markets found")
         return
     
-    # 收集所有订单簿数据
+    # Collect all order-book data.
     all_orderbooks = []
     all_analysis = []
     
-    print(f"\n📥 开始获取订单簿数据...")
+    print(f"\n📥 Fetching order-book data...")
     print()
     
-    for i, market in enumerate(markets[:10], 1):  # 限制前10个市场
+    for i, market in enumerate(markets[:10], 1):  # Limit to the first 10 markets.
         question = market.get("question", "Unknown")
         market_id = market.get("id", "")
         tokens = market.get("tokens", [])
@@ -179,7 +179,7 @@ def main():
             if not token_id:
                 continue
             
-            print(f"   📖 获取 {outcome} 的订单簿...")
+            print(f"   📖 Fetching the order book for {outcome}...")
             
             orderbook = get_orderbook(token_id)
             if orderbook:
@@ -191,14 +191,14 @@ def main():
                     "orderbook": orderbook
                 })
                 
-                # 分析订单簿
+                # Analyze the order book.
                 analysis = analyze_orderbook(orderbook, token_id)
                 if analysis:
                     analysis["market"] = question
                     analysis["outcome"] = outcome
                     all_analysis.append(analysis)
                     
-                    # 打印简要信息
+                    # Print a summary.
                     if analysis.get("bids"):
                         print(f"      Bids: {analysis['bids_sort']}, "
                               f"first={analysis['bids'][0]['price']:.4f}, "
@@ -210,23 +210,23 @@ def main():
         
         print()
     
-    # 保存原始数据
+    # Save raw data.
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     raw_file = output_dir / f"orderbooks_raw_{timestamp}.json"
     with open(raw_file, "w", encoding="utf-8") as f:
         json.dump(all_orderbooks, f, indent=2, ensure_ascii=False)
-    print(f"✅ 原始数据已保存: {raw_file}")
+    print(f"✅ Raw data saved: {raw_file}")
     
-    # 保存分析结果
+    # Save analysis results.
     analysis_file = output_dir / f"orderbooks_analysis_{timestamp}.json"
     with open(analysis_file, "w", encoding="utf-8") as f:
         json.dump(all_analysis, f, indent=2, ensure_ascii=False)
-    print(f"✅ 分析结果已保存: {analysis_file}")
+    print(f"✅ Analysis results saved: {analysis_file}")
     
-    # 生成总结报告
+    # Generate a summary report.
     print("\n" + "=" * 60)
-    print("📊 订单簿排序分析总结")
+    print("📊 Order-Book Ordering Analysis Summary")
     print("=" * 60)
     
     bids_sort_summary = {}
@@ -239,15 +239,15 @@ def main():
         bids_sort_summary[bids_sort] = bids_sort_summary.get(bids_sort, 0) + 1
         asks_sort_summary[asks_sort] = asks_sort_summary.get(asks_sort, 0) + 1
     
-    print(f"\nBids 排序统计:")
+    print(f"\nBid ordering statistics:")
     for sort_type, count in bids_sort_summary.items():
-        print(f"  {sort_type}: {count} 个市场")
+        print(f"  {sort_type}: {count} markets")
     
-    print(f"\nAsks 排序统计:")
+    print(f"\nAsk ordering statistics:")
     for sort_type, count in asks_sort_summary.items():
-        print(f"  {sort_type}: {count} 个市场")
+        print(f"  {sort_type}: {count} markets")
     
-    # 保存总结
+    # Save the summary.
     summary = {
         "timestamp": datetime.now().isoformat(),
         "total_markets": len(markets),
@@ -259,10 +259,10 @@ def main():
     summary_file = output_dir / f"summary_{timestamp}.json"
     with open(summary_file, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
-    print(f"\n✅ 总结报告已保存: {summary_file}")
+    print(f"\n✅ Summary report saved: {summary_file}")
     
     print("\n" + "=" * 60)
-    print("✅ 数据采集完成！")
+    print("✅ Data collection complete!")
     print("=" * 60)
 
 if __name__ == "__main__":

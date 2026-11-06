@@ -1,306 +1,209 @@
 import { useState, useEffect, useCallback } from 'react';
-import { KalshiPosition, PolymarketPosition, UnifiedPosition } from '../types';
-import { 
-  getKalshiPositions, 
-  createKalshiOrder,
-  getPolymarketPositions,
-  createPolymarketOrder
-} from '../utils/api';
+import { PositionCard, PositionLeg } from '../types';
+import { getUnifiedPositions, createKalshiOrder } from '../utils/api';
 
 interface OrderPanelProps {
   apiBaseUrl: string;
 }
 
+const money = (v: number | null | undefined) =>
+  v === null || v === undefined ? '-' : `$${v.toFixed(2)}`;
+
+const cents = (v: number | null | undefined) =>
+  v === null || v === undefined ? '-' : `${(v * 100).toFixed(1)}¢`;
+
+const pnlText = (pnl: number | null | undefined, cost?: number) => {
+  if (pnl === null || pnl === undefined) return '-';
+  const sign = pnl >= 0 ? '+' : '';
+  const pct = cost && cost > 0 ? ` (${sign}${((pnl / cost) * 100).toFixed(1)}%)` : '';
+  return `${sign}$${pnl.toFixed(2)}${pct}`;
+};
+
+const pnlColor = (pnl: number | null | undefined) =>
+  pnl === null || pnl === undefined
+    ? 'text-[--text-muted]'
+    : pnl >= 0
+      ? 'text-green-400'
+      : 'text-red-400';
+
+function Field({
+  label,
+  value,
+  className = 'text-[--text-secondary]',
+  mono = false,
+  title,
+}: {
+  label: string;
+  value: string;
+  className?: string;
+  mono?: boolean;
+  title?: string;
+}) {
+  return (
+    <div className="flex flex-col leading-tight" title={title}>
+      <span className="text-[8px] uppercase tracking-wide text-[--text-muted]">{label}</span>
+      <span className={`text-[10px] ${mono ? 'font-mono' : ''} ${className}`}>{value}</span>
+    </div>
+  );
+}
+
 export function OrderPanel({ apiBaseUrl }: OrderPanelProps) {
-  const [positions, setPositions] = useState<UnifiedPosition[]>([]);
+  const [cards, setCards] = useState<PositionCard[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
 
-  // 转换 Kalshi 持仓为统一格式
-  const convertKalshiPosition = (pos: KalshiPosition): UnifiedPosition => ({
-    id: pos.ticker,
-    platform: 'kalshi',
-    ticker: pos.ticker,
-    title: pos.event_ticker || pos.ticker,
-    size: pos.position,
-    side: pos.position > 0 ? 'yes' : 'no',
-    value: Math.abs(pos.market_exposure) / 100,
-    pnl: pos.realized_pnl ? pos.realized_pnl / 100 : undefined,
-  });
-
-  // 转换 Polymarket 持仓为统一格式
-  const convertPolyPosition = (pos: PolymarketPosition): UnifiedPosition => ({
-    id: pos.conditionId || pos.asset || String(pos.id) || Math.random().toString(),
-    platform: 'polymarket',
-    ticker: pos.conditionId || pos.asset || '',
-    title: pos.title || pos.asset || '未知市场',
-    size: pos.size ? parseFloat(pos.size) : 0,
-    avgPrice: pos.avgPrice ? parseFloat(pos.avgPrice) : undefined,
-    curPrice: pos.curPrice ? parseFloat(pos.curPrice) : undefined,
-    value: pos.value ? parseFloat(pos.value) : undefined,
-    pnl: pos.pnl ? parseFloat(pos.pnl) : undefined,
-    pnlPercent: pos.pnlPercent ? parseFloat(pos.pnlPercent) : undefined,
-  });
-
-  // 加载数据 - 分别获取，避免一个失败影响另一个
   const loadData = useCallback(async () => {
     setLoading(true);
-    setError(null);
-    
-    let kalshiPositions: KalshiPosition[] = [];
-    let polyPositions: PolymarketPosition[] = [];
-    const errors: string[] = [];
-
-    // 获取 Kalshi 持仓
     try {
-      const kalshiRes = await getKalshiPositions(apiBaseUrl);
-      if (kalshiRes.positions) {
-        kalshiPositions = kalshiRes.positions;
-      }
-      if (kalshiRes.error) {
-        errors.push(`Kalshi: ${kalshiRes.error}`);
-      }
+      const res = await getUnifiedPositions(apiBaseUrl);
+      setCards(res.cards);
+      setError(res.errors.length > 0 ? res.errors.join('; ') : null);
     } catch (e) {
-      errors.push(`Kalshi: ${e instanceof Error ? e.message : '获取失败'}`);
+      setError(e instanceof Error ? e.message : 'Fetch failed');
+    } finally {
+      setLoading(false);
     }
-
-    // 获取 Polymarket 持仓
-    try {
-      const polyRes = await getPolymarketPositions(apiBaseUrl);
-      if (polyRes.positions) {
-        polyPositions = polyRes.positions;
-      }
-      if (polyRes.error) {
-        errors.push(`Poly: ${polyRes.error}`);
-      }
-    } catch (e) {
-      errors.push(`Poly: ${e instanceof Error ? e.message : '获取失败'}`);
-    }
-
-    const unified: UnifiedPosition[] = [];
-    
-    // 添加 Kalshi 持仓（过滤掉 position=0 的）
-    for (const pos of kalshiPositions) {
-      if (pos.position !== 0) {
-        unified.push(convertKalshiPosition(pos));
-      }
-    }
-    
-    // 添加 Polymarket 持仓（过滤掉 size=0 的）
-    for (const pos of polyPositions) {
-      const size = pos.size ? parseFloat(pos.size) : 0;
-      if (size !== 0) {
-        unified.push(convertPolyPosition(pos));
-      }
-    }
-    
-    setPositions(unified);
-    
-    // 只有在没有任何持仓时才显示完整错误
-    // 否则只在底部显示警告
-    if (errors.length > 0 && unified.length === 0) {
-      setError(errors.join('; '));
-    } else if (errors.length > 0) {
-      // 有持仓但也有错误，显示为警告
-      setError(errors.join('; '));
-    } else {
-      setError(null);
-    }
-    
-    setLoading(false);
   }, [apiBaseUrl]);
 
-  // 初始加载和定时刷新
   useEffect(() => {
     loadData();
-    const interval = setInterval(loadData, 15000); // 每15秒刷新
+    const interval = setInterval(loadData, 60000); // Account endpoints are rate-limited.
     return () => clearInterval(interval);
   }, [loadData]);
 
-  // Kalshi 卖出持仓
-  const handleSellKalshi = async (position: UnifiedPosition) => {
-    if (position.size === 0) return;
-    
-    // Kalshi 卖出逻辑：
-    // position > 0 表示持有 YES，要卖出 YES
-    // position < 0 表示持有 NO，要卖出 NO
-    const side = position.size > 0 ? 'yes' : 'no';
-    const count = Math.abs(position.size);
-    
-    setActionLoading(position.id);
+  const handleSell = async (leg: PositionLeg) => {
+    if (leg.platform !== 'kalshi') {
+      // Portfolio records do not carry the native US market slug and explicit
+      // LONG/SHORT mapping required for a safe close. Refuse rather than infer.
+      alert(`Cannot sell ${leg.title}: native Polymarket US position mapping is unavailable.`);
+      return;
+    }
+    setActionLoading(leg.market_id);
     try {
       const result = await createKalshiOrder(apiBaseUrl, {
-        ticker: position.ticker,
-        side: side,
+        ticker: leg.market_id,
+        side: leg.side as 'yes' | 'no',
         action: 'sell',
-        count: count,
+        count: leg.contracts,
       });
-      
       if (result.success) {
-        loadData(); // 刷新数据
+        loadData();
       } else {
-        alert(`卖出失败: ${result.error}`);
+        alert(`Sell failed: ${result.error}`);
       }
     } catch (e) {
-      alert(`卖出失败: ${e instanceof Error ? e.message : '未知错误'}`);
+      alert(`Sell failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
     } finally {
       setActionLoading(null);
     }
   };
 
-  // Polymarket 卖出持仓
-  const handleSellPoly = async (position: UnifiedPosition) => {
-    if (position.size === 0) return;
-    
-    setActionLoading(position.id);
-    try {
-      // Polymarket 卖出：amount 是 USDC 金额
-      // 使用当前价值作为卖出金额
-      const amount = position.value || Math.abs(position.size);
-      
-      const result = await createPolymarketOrder(apiBaseUrl, {
-        token_id: position.ticker,
-        side: 'sell',
-        amount: amount,
-      });
-      
-      if (result.success) {
-        loadData(); // 刷新数据
-      } else {
-        alert(`卖出失败: ${result.error}`);
-      }
-    } catch (e) {
-      alert(`卖出失败: ${e instanceof Error ? e.message : '未知错误'}`);
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  // 统一卖出处理
-  const handleSell = (position: UnifiedPosition) => {
-    if (position.platform === 'kalshi') {
-      handleSellKalshi(position);
-    } else {
-      handleSellPoly(position);
-    }
-  };
-
-  // 格式化数值
-  const formatValue = (value?: number) => {
-    if (value === undefined) return '-';
-    return `$${value.toFixed(2)}`;
-  };
-
-  const formatPnl = (pnl?: number, percent?: number) => {
-    if (pnl === undefined) return '-';
-    const sign = pnl >= 0 ? '+' : '';
-    const percentStr = percent !== undefined ? ` (${sign}${percent.toFixed(1)}%)` : '';
-    return `${sign}$${pnl.toFixed(2)}${percentStr}`;
-  };
+  const renderLeg = (leg: PositionLeg) => (
+    <div key={`${leg.platform}-${leg.market_id}`} className="flex items-center justify-between gap-2">
+      <div className="flex items-center gap-2 min-w-0">
+        <span
+          className={`text-[9px] px-1.5 py-0.5 rounded font-medium ${
+            leg.platform === 'kalshi' ? 'bg-blue-500/20 text-blue-400' : 'bg-purple-500/20 text-purple-400'
+          }`}
+        >
+          {leg.platform === 'kalshi' ? 'K' : 'P'}
+        </span>
+        <span className="text-[9px] px-1 rounded bg-[--bg-secondary] text-[--text-secondary]">
+          {leg.side.toUpperCase()}
+        </span>
+        <Field label="Qty" value={leg.contracts.toFixed(leg.platform === 'polymarket' ? 2 : 0)} mono />
+        <Field label="Entry → Now" value={`${cents(leg.entry_price)} → ${cents(leg.current_price)}`} mono />
+        <Field label="Cost → Value" value={`${money(leg.cost)} → ${money(leg.value)}`} />
+        <Field
+          label="P&L"
+          value={pnlText(leg.unrealized_pnl, leg.cost)}
+          className={pnlColor(leg.unrealized_pnl)}
+        />
+        <Field
+          label="Fees"
+          value={leg.fees === null ? 'n/a' : money(leg.fees)}
+          title="Polymarket exposes no fee data"
+        />
+      </div>
+      <button
+        className="px-2 py-1 text-[10px] bg-red-500/20 text-red-400 rounded hover:bg-red-500/30 disabled:opacity-50"
+        onClick={() => handleSell(leg)}
+        disabled={actionLoading === leg.market_id}
+      >
+        {actionLoading === leg.market_id ? '...' : 'Sell'}
+      </button>
+    </div>
+  );
 
   return (
     <div className="card h-full flex flex-col overflow-hidden">
-      {/* 标题栏 */}
       <div className="flex items-center justify-between border-b border-[--border-color] px-3 py-2 flex-shrink-0">
         <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-[--text-primary]">💼 持仓</span>
-          <span className="text-[10px] text-[--text-muted]">({positions.length})</span>
+          <span className="text-sm font-medium text-[--text-primary]">💼 Positions</span>
+          <span className="text-[10px] text-[--text-muted]">({cards.length})</span>
         </div>
         <button
           className="px-2 py-1 text-[--text-muted] hover:text-[--text-secondary] text-xs"
           onClick={loadData}
           disabled={loading}
-          title="刷新"
+          title="Refresh"
         >
           {loading ? '...' : '🔄'}
         </button>
       </div>
 
-      {/* 内容区 */}
       <div className="flex-1 overflow-y-auto p-2">
-        {loading && positions.length === 0 ? (
-          <div className="flex items-center justify-center h-full text-[--text-muted] text-xs">
-            加载中...
-          </div>
-        ) : error && positions.length === 0 ? (
-          <div className="flex items-center justify-center h-full text-red-400 text-xs">
-            {error}
-          </div>
-        ) : positions.length === 0 ? (
-          <div className="flex items-center justify-center h-full text-[--text-muted] text-xs">
-            暂无持仓
-          </div>
+        {loading && cards.length === 0 ? (
+          <div className="flex items-center justify-center h-full text-[--text-muted] text-xs">Loading...</div>
+        ) : error && cards.length === 0 ? (
+          <div className="flex items-center justify-center h-full text-red-400 text-xs">{error}</div>
+        ) : cards.length === 0 ? (
+          <div className="flex items-center justify-center h-full text-[--text-muted] text-xs">No positions</div>
         ) : (
           <div className="space-y-1.5">
-            {positions.map((pos) => (
-              <div
-                key={`${pos.platform}-${pos.id}`}
-                className="bg-[--bg-tertiary] rounded p-2"
-              >
-                {/* 第一行：平台标记 + 市场名 */}
-                <div className="flex items-center justify-between mb-1">
-                  <div className="flex items-center gap-2 flex-1 min-w-0">
-                    <span className={`text-[9px] px-1.5 py-0.5 rounded font-medium ${
-                      pos.platform === 'kalshi' 
-                        ? 'bg-blue-500/20 text-blue-400' 
-                        : 'bg-purple-500/20 text-purple-400'
-                    }`}>
-                      {pos.platform === 'kalshi' ? 'K' : 'P'}
-                    </span>
-                    <span className="text-xs font-medium text-[--text-primary] truncate" title={pos.ticker}>
-                      {pos.title || pos.ticker}
-                    </span>
-                  </div>
-                </div>
-                
-                {/* 第二行：持仓信息 */}
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    {/* 数量 */}
-                    <div className="flex items-center gap-1">
-                      <span className={`text-xs font-mono ${pos.size > 0 ? 'text-green-400' : 'text-red-400'}`}>
-                        {pos.size > 0 ? '+' : ''}{pos.size.toFixed(pos.platform === 'polymarket' ? 2 : 0)}
-                      </span>
-                      {pos.side && pos.platform === 'kalshi' && (
-                        <span className={`text-[9px] px-1 rounded ${
-                          pos.side === 'yes' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
-                        }`}>
-                          {pos.side.toUpperCase()}
+            {cards.map((card) => {
+              const paired = card.kind === 'paired';
+              const title = card.event_name || card.legs[0]?.title || '';
+              return (
+                <div
+                  key={card.legs.map((l) => `${l.platform}-${l.market_id}-${l.side}`).join('|')}
+                  className={`bg-[--bg-tertiary] rounded p-2 space-y-1 ${paired ? '' : 'border border-amber-500/40'}`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      {paired ? (
+                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-green-500/20 text-green-400" title="Hedged pair opened together by this bot">
+                          🔗 Paired
+                        </span>
+                      ) : (
+                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400" title="No matching hedge leg held: one-sided exposure">
+                          ⚠ Unhedged
                         </span>
                       )}
-                    </div>
-                    
-                    {/* 价值 */}
-                    <span className="text-[10px] text-[--text-muted]">
-                      {formatValue(pos.value)}
-                    </span>
-                    
-                    {/* 盈亏 */}
-                    {pos.pnl !== undefined && (
-                      <span className={`text-[10px] ${pos.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                        {formatPnl(pos.pnl, pos.pnlPercent)}
+                      <span className="text-xs font-medium text-[--text-primary] truncate" title={title}>
+                        {title}
                       </span>
-                    )}
+                    </div>
+                    <div className="text-[10px] whitespace-nowrap">
+                      <span className="text-[--text-muted]">
+                        Total {money(card.total_cost)} → {money(card.total_value)}{' '}
+                      </span>
+                      <span className={pnlColor(card.total_pnl)}>{pnlText(card.total_pnl, card.total_cost)}</span>
+                    </div>
                   </div>
-                  
-                  {/* 卖出按钮 */}
-                  <button
-                    className="px-2 py-1 text-[10px] bg-red-500/20 text-red-400 rounded hover:bg-red-500/30 disabled:opacity-50"
-                    onClick={() => handleSell(pos)}
-                    disabled={actionLoading === pos.id || pos.size === 0}
-                  >
-                    {actionLoading === pos.id ? '...' : '卖出'}
-                  </button>
+                  {card.contracts_mismatch && (
+                    <div className="text-[9px] text-amber-400">⚠ Leg sizes differ: only partly hedged</div>
+                  )}
+                  {card.legs.map(renderLeg)}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
 
-      {/* 底部错误提示（如果有部分错误） */}
-      {error && positions.length > 0 && (
+      {error && cards.length > 0 && (
         <div className="border-t border-[--border-color] px-2 py-1 bg-yellow-500/10">
           <span className="text-[9px] text-yellow-400">⚠️ {error}</span>
         </div>

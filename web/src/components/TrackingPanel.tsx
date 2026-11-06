@@ -8,7 +8,7 @@ interface TrackingPanelProps {
 export function TrackingPanel({ apiBaseUrl }: TrackingPanelProps) {
   const [trackingStats, setTrackingStats] = useState<TrackingStats | null>(null);
 
-  // 定期获取追踪数据
+  // Fetch tracking data periodically.
   useEffect(() => {
     const fetchTracking = async () => {
       try {
@@ -18,33 +18,33 @@ export function TrackingPanel({ apiBaseUrl }: TrackingPanelProps) {
           setTrackingStats(data);
         }
       } catch (error) {
-        console.error('获取追踪数据失败:', error);
+        console.error('Failed to fetch tracking data:', error);
       }
     };
 
     fetchTracking();
-    const interval = setInterval(fetchTracking, 2000); // 每2秒刷新
+    const interval = setInterval(fetchTracking, 2000); // Refresh every two seconds.
     return () => clearInterval(interval);
   }, [apiBaseUrl]);
 
   if (!trackingStats) {
     return (
       <div className="p-4 text-center text-[--text-muted]">
-        加载追踪数据...
+        Loading tracking data...
       </div>
     );
   }
 
   return (
     <div className="h-full flex flex-col">
-      {/* 标题 */}
+      {/* Title */}
       <div className="px-4 py-2 border-b border-[--border-color]">
         <span className="text-sm font-medium text-[--accent-green]">
-          🎯 追踪中 ({trackingStats.active_count})
+          🎯 Tracking ({trackingStats.active_count})
         </span>
       </div>
 
-      {/* 内容区域 */}
+      {/* Content area */}
       <div className="flex-1 overflow-y-auto p-3">
         <ActiveTrackingList items={trackingStats.active || []} />
       </div>
@@ -52,14 +52,14 @@ export function TrackingPanel({ apiBaseUrl }: TrackingPanelProps) {
   );
 }
 
-// 追踪中列表
+// Active tracking list
 function ActiveTrackingList({ items }: { items: ActiveTracking[] }) {
   if (!items || items.length === 0) {
     return (
       <div className="text-center py-8">
         <div className="text-3xl mb-2">😴</div>
-        <div className="text-[--text-muted] text-sm">暂无正在追踪的套利机会</div>
-        <div className="text-[--text-muted] text-xs mt-1">当利润超过3%时开始追踪</div>
+        <div className="text-[--text-muted] text-sm">No arbitrage opportunities are currently being tracked</div>
+        <div className="text-[--text-muted] text-xs mt-1">Tracking starts when profit exceeds 3%</div>
       </div>
     );
   }
@@ -82,12 +82,12 @@ function ActiveTrackingList({ items }: { items: ActiveTracking[] }) {
               <div className="text-lg font-bold text-[--accent-green]">
                 {item.max_profit_margin.toFixed(2)}%
               </div>
-              <div className="text-xs text-[--text-muted]">最高利润</div>
+              <div className="text-xs text-[--text-muted]">Peak Profit</div>
             </div>
           </div>
           <div className="flex justify-between text-xs text-[--text-muted]">
-            <span>⏱ 已持续 {formatDuration(item.duration_seconds)}</span>
-            <span>开始: {formatTime(item.start_time)}</span>
+            <span>⏱ Duration: {formatDuration(item.duration_seconds)}</span>
+            <span>Started: {formatTime(item.start_time)}</span>
           </div>
         </div>
       ))}
@@ -95,22 +95,22 @@ function ActiveTrackingList({ items }: { items: ActiveTracking[] }) {
   );
 }
 
-// 格式化持续时间
+// Format duration.
 function formatDuration(seconds: number): string {
   if (seconds < 60) {
-    return `${Math.round(seconds)}秒`;
+    return `${Math.round(seconds)}s`;
   } else if (seconds < 3600) {
     const mins = Math.floor(seconds / 60);
     const secs = Math.round(seconds % 60);
-    return `${mins}分${secs}秒`;
+    return `${mins}m ${secs}s`;
   } else {
     const hours = Math.floor(seconds / 3600);
     const mins = Math.floor((seconds % 3600) / 60);
-    return `${hours}小时${mins}分`;
+    return `${hours}h ${mins}m`;
   }
 }
 
-// 格式化时间
+// Format time.
 function formatTime(isoString: string): string {
   const date = new Date(isoString);
   return date.toLocaleTimeString('zh-CN', {

@@ -1,7 +1,7 @@
 //! Event and Market Matcher
 //!
 //! Matching logic optimization:
-//! - Event matching: Use team abbreviation + game date to match events on both platforms
+//! - Event matching: Use canonical competitors + game date to match events on both platforms
 //! - Market matching: 2:1 matching (two Kalshi markets correspond to one Poly market)
 //!
 //! Key points:
@@ -27,8 +27,6 @@ pub struct EventMatcher {
 pub struct SubscriptionInfo {
     /// Kalshi tickers to subscribe
     pub kalshi_tickers: Vec<String>,
-    /// Polymarket token IDs to subscribe
-    pub polymarket_token_ids: Vec<String>,
     /// Lookup map: subscription_id -> Vec<MatchedMarket index>
     pub market_lookup: HashMap<String, Vec<usize>>,
 }
@@ -38,14 +36,8 @@ impl SubscriptionInfo {
     pub fn empty() -> Self {
         Self {
             kalshi_tickers: Vec::new(),
-            polymarket_token_ids: Vec::new(),
             market_lookup: HashMap::new(),
         }
-    }
-    
-    /// Check if there are any subscriptions
-    pub fn is_empty(&self) -> bool {
-        self.kalshi_tickers.is_empty() && self.polymarket_token_ids.is_empty()
     }
 }
 
@@ -66,28 +58,22 @@ impl EventMatcher {
         _polymarket_markets: &[PolymarketMarket],
     ) -> (Vec<MatchedEvent>, Vec<MatchedMarket>) {
         info!("============================================================");
-        info!("🔍 开始两阶段匹配 (非拆分版本)");
-        info!(
-            "   Kalshi: {} 个事件",
-            kalshi_events.len()
-        );
-        info!(
-            "   Polymarket: {} 个事件",
-            polymarket_events.len()
-        );
+        info!("🔍 Starting two-stage matching (non-split version)");
+        info!("   Kalshi: {} events", kalshi_events.len());
+        info!("   Polymarket: {} events", polymarket_events.len());
         info!("============================================================");
 
         // Stage 1: Event matching
         let matched_events = self.match_events(kalshi_events, polymarket_events);
         info!(
-            "📊 阶段 1 完成: 匹配了 {} 个事件",
+            "📊 Stage 1 complete: matched {} events",
             matched_events.len()
         );
 
         // Stage 2: Market matching (2:1)
         let matched_markets = self.match_markets(&matched_events);
         info!(
-            "📊 阶段 2 完成: 匹配了 {} 个市场对",
+            "📊 Stage 2 complete: matched {} market pairs",
             matched_markets.len()
         );
 
@@ -101,16 +87,18 @@ impl EventMatcher {
         polymarket_events: &[PolymarketEvent],
     ) -> Vec<MatchedEvent> {
         info!("----------------------------------------");
-        info!("🎯 阶段 1: 事件匹配");
+        info!("🎯 Stage 1: Event matching");
         info!("----------------------------------------");
 
         let mut matched_events = Vec::new();
         let mut used_poly_ids = std::collections::HashSet::new();
 
-        // Build Polymarket event index: event_name -> [events]
+        // Build Polymarket event index: category + event_name -> [events].
+        // Keeping sports separate prevents a coincidental competitor string from
+        // ever matching an NBA event to a tennis event.
         let mut poly_index: HashMap<String, Vec<&PolymarketEvent>> = HashMap::new();
         for event in polymarket_events {
-            let key = event.name.to_uppercase();
+            let key = format!("{}:{}", event.category, event.name.to_uppercase());
             poly_index.entry(key).or_default().push(event);
         }
 
@@ -140,7 +128,11 @@ impl EventMatcher {
                     continue;
                 };
 
-                let candidates = poly_index.get(name).map(|v| v.as_slice()).unwrap_or(&[]);
+                let index_key = format!("{}:{}", k_event.category, name);
+                let candidates = poly_index
+                    .get(&index_key)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
 
                 for p_event in candidates {
                     if used_poly_ids.contains(&p_event.event_id) {
@@ -154,7 +146,7 @@ impl EventMatcher {
                         (Some(kd), Some(pd)) => {
                             if kd != pd {
                                 debug!(
-                                    "   ❌ 日期不匹配: {} ({}) vs {} ({})",
+                                    "   ❌ Date mismatch: {} ({}) vs {} ({})",
                                     k_event.name, kd, p_event.name, pd
                                 );
                                 continue;
@@ -167,7 +159,7 @@ impl EventMatcher {
                         }
                         _ => {
                             warn!(
-                                "   ⚠️ 缺少日期: {} ({:?}) vs {} ({:?})",
+                                "   ⚠️ Missing date: {} ({:?}) vs {} ({:?})",
                                 k_event.name, k_date, p_event.name, p_date
                             );
                             if is_reversed {
@@ -189,7 +181,7 @@ impl EventMatcher {
                 if best_confidence >= 0.7 {
                     let matched = MatchedEvent {
                         event_name: k_event.name.clone(),
-                        game_date: k_date,  // Use Kalshi event's date
+                        game_date: k_date, // Use Kalshi event's date
                         kalshi_event: Some(k_event.clone()),
                         polymarket_event: Some(p_event.clone()),
                         confidence: best_confidence,
@@ -198,12 +190,12 @@ impl EventMatcher {
                     used_poly_ids.insert(p_event.event_id.clone());
 
                     info!(
-                        "   ✅ 匹配: {} <-> {} (置信度: {:.2})",
+                        "   ✅ Match: {} <-> {} (confidence: {:.2})",
                         k_event.name, p_event.name, best_confidence
                     );
                 }
             } else {
-                warn!("   ❌ 未找到匹配: {}", k_event.name);
+                warn!("   ❌ No match found: {}", k_event.name);
             }
         }
 
@@ -218,7 +210,7 @@ impl EventMatcher {
     /// - Create 2 MatchedMarkets, each corresponding to one Kalshi market
     fn match_markets(&self, matched_events: &[MatchedEvent]) -> Vec<MatchedMarket> {
         info!("----------------------------------------");
-        info!("🎯 阶段 2: 市场匹配 (2:1)");
+        info!("🎯 Stage 2: Market matching (2:1)");
         info!("----------------------------------------");
 
         let mut matched_markets = Vec::new();
@@ -250,7 +242,7 @@ impl EventMatcher {
                 let matched = MatchedMarket {
                     event_name: matched_event.event_name.clone(),
                     team_name: team_name.clone(),
-                    game_date: matched_event.game_date,  // Inherit from MatchedEvent
+                    game_date: matched_event.game_date, // Inherit from MatchedEvent
                     kalshi_market: k_market.clone(),
                     polymarket_market: poly_market.clone(),
                     poly_yes_price: poly_yes,
@@ -260,7 +252,7 @@ impl EventMatcher {
                 matched_markets.push(matched);
 
                 info!(
-                    "   ✅ 市场匹配: {} - {}",
+                    "   ✅ Market match: {} - {}",
                     matched_event.event_name, team_name
                 );
                 debug!(
@@ -276,24 +268,13 @@ impl EventMatcher {
 
     /// Get WebSocket subscription info
     ///
-    /// Important: Each MatchedMarket needs to subscribe to two Poly tokens:
-    /// - Own token (for poly_yes_price)
-    /// - Opponent token (for poly_no_price)
-    ///
-    /// Because poly_no_price != 1 - poly_yes_ask,
-    /// it equals opponent token's ask price
-    ///
-    /// Returns:
-    /// - kalshi_tickers: Kalshi tickers to subscribe
-    /// - polymarket_token_ids: Polymarket token IDs to subscribe
-    /// - market_lookup: subscription_id -> Vec<MatchedMarket index> mapping
+    /// Polymarket US gateway markets are REST-polled, not CLOB-subscribed.
+    /// The lookup therefore contains Kalshi tickers only.
     pub fn get_subscription_info(&self, matched_markets: &[MatchedMarket]) -> SubscriptionInfo {
         let mut kalshi_tickers = Vec::new();
-        let mut polymarket_token_ids = Vec::new();
         let mut market_lookup: HashMap<String, Vec<usize>> = HashMap::new();
 
         let mut seen_kalshi = std::collections::HashSet::new();
-        let mut seen_poly = std::collections::HashSet::new();
 
         for (idx, mm) in matched_markets.iter().enumerate() {
             // Kalshi ticker
@@ -305,41 +286,15 @@ impl EventMatcher {
 
             // Add to lookup
             market_lookup.entry(k_id.clone()).or_default().push(idx);
-
-            // Polymarket: Subscribe to both tokens (own and opponent)
-            let poly_market = &mm.polymarket_market;
-
-            // Own token (for yes_price)
-            let own_token = poly_market.get_token_for_team(&mm.team_name);
-
-            // Opponent token (for no_price)
-            let opponent = poly_market.get_opponent(&mm.team_name);
-            let opponent_token = opponent.and_then(|o| poly_market.get_token_for_team(o));
-
-            // Subscribe to both tokens
-            for p_token in [own_token, opponent_token].into_iter().flatten() {
-                if !seen_poly.contains(p_token) {
-                    polymarket_token_ids.push(p_token.to_string());
-                    seen_poly.insert(p_token.to_string());
-                }
-
-                // Both tokens point to the same MatchedMarket
-                market_lookup
-                    .entry(p_token.to_string())
-                    .or_default()
-                    .push(idx);
-            }
         }
 
         info!(
-            "📡 订阅信息: Kalshi {} 个代码, Polymarket {} 个代币",
-            kalshi_tickers.len(),
-            polymarket_token_ids.len()
+            "📡 Subscription information: Kalshi {} tickers; Polymarket US uses REST quotes",
+            kalshi_tickers.len()
         );
 
         SubscriptionInfo {
             kalshi_tickers,
-            polymarket_token_ids,
             market_lookup,
         }
     }
@@ -352,15 +307,16 @@ mod tests {
     fn create_test_poly_market() -> PolymarketMarket {
         PolymarketMarket {
             market_id: "poly-123".to_string(),
+            market_slug: "lal-mem-2026-08-17".to_string(),
             event_name: "LAL-MEM".to_string(),
             team_a: "LAL".to_string(),
             team_b: "MEM".to_string(),
             price_a: 0.45,
             price_b: 0.55,
+            team_a_position: crate::models::PolymarketPositionSide::Long,
+            team_b_position: crate::models::PolymarketPositionSide::Short,
             start_time: None,
             volume: None,
-            token_id_a: Some("token-lal".to_string()),
-            token_id_b: Some("token-mem".to_string()),
         }
     }
 
@@ -387,11 +343,16 @@ mod tests {
     }
 
     #[test]
-    fn test_get_token_for_team() {
+    fn test_us_execution_for_competitor() {
         let market = create_test_poly_market();
 
-        assert_eq!(market.get_token_for_team("LAL"), Some("token-lal"));
-        assert_eq!(market.get_token_for_team("MEM"), Some("token-mem"));
-        assert_eq!(market.get_token_for_team("BOS"), None);
+        assert_eq!(
+            market
+                .us_execution_for_competitor("LAL")
+                .unwrap()
+                .position_side,
+            crate::models::PolymarketPositionSide::Long
+        );
+        assert_eq!(market.us_execution_for_competitor("BOS"), None);
     }
 }

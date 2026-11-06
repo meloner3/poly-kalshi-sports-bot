@@ -1,21 +1,21 @@
-Polytaoli - 预测市场套利扫描器
+Polytaoli - Prediction Market Arbitrage Scanner
 ================================
 
-部署步骤:
-1. 复制 config.example.toml 为 config.toml
-2. 编辑 config.toml，填入 Kalshi API 密钥
-3. 复制 poly-order-service/config.toml.sample 为 poly-order-service/config.toml
-4. 编辑 poly-order-service/config.toml，填入 Polymarket 私钥和钱包地址
-5. 运行: ./start.sh
+Deployment steps:
+1. Copy config.example.toml to config.toml.
+2. Edit config.toml and enter your Kalshi API credentials.
+3. Edit `config.toml` and set `polymarket.key_id` and `polymarket.secret_key`, generated at https://polymarket.us/developer.
+4. Run: ./start.sh
 
-配置说明:
-- Rust 后端端口: 8000
-- Python 下单服务端口: 8001
-- 日志: 保存在 logs/ 目录
-- 前端: 访问 http://your-server:8000
+Configuration:
+- Rust backend port: 8000
+- Logs: stored in the logs/ directory
+- Frontend: visit http://your-server:8000
 
-服务架构:
-- Rust 后端: 处理套利扫描、WebSocket、API
-- Python 服务: 处理 Polymarket 下单（使用官方 SDK）
+Service architecture:
+- Rust backend: handles arbitrage scanning, WebSockets, the API, and both
+  exchanges' order placement (Kalshi RSA-PSS-signed, Polymarket US
+  Ed25519-signed) - there is no separate Python order service.
+  poly-order-service/ is kept in this bundle for reference only.
 
-停止程序: Ctrl+C 或 kill 进程
+Stop the application: Ctrl+C or kill the process.

@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kalshi-mention"
+version = "0.0.0+vendored.88f9fb6"
+description = "Forecasts P(Trump says phrase X during event Y) and tests it against Kalshi prices. Vendored — see VENDORED.md."
+requires-python = ">=3.11"
+
+# Dependencies are pinned in requirements.txt, which is the file to install
+# from. They are deliberately not duplicated here: this project's numbers are
+# only reproducible against a known numeric stack, and two lists would drift.
+dependencies = []
+
+[tool.setuptools]
+# Only the importable package ships. tests/, scripts/ and the markdown docs
+# sit alongside it in this directory and are not part of the distribution.
+packages = ["kalshi_mention"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

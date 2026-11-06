@@ -1,86 +1,80 @@
-# Polytaoli - 预测市场套利扫描器
+# Polytaoli - Prediction Market Arbitrage Scanner
 
-高性能预测市场套利机会实时监控系统，支持 **Kalshi** 和 **Polymarket** 平台。
+A high-performance, real-time prediction market arbitrage opportunity monitoring system for **Kalshi** and **Polymarket**.
 
-## 🎯 核心特性
+## Core Features
 
-- 🚀 **高性能**: Rust 后端 + React 前端 + WebSocket 实时通信
-- 📊 **实时监控**: 双平台市场数据同步，智能事件匹配
-- 💰 **自动套利**: 计算利润率、预期收益，支持自动下单
-- 📈 **数据追踪**: 套利历史、持仓管理、性能监控
-- 🔔 **Telegram 通知**: 自动交易推送
+- **High performance**: Rust backend, React frontend, and real-time WebSocket communication
+- **Real-time monitoring**: Synchronized market data from both platforms with intelligent event matching
+- **Automated arbitrage**: Calculates profit margins and expected returns, with optional automated order execution
+- **Data tracking**: Arbitrage history, position management, and performance monitoring
+- **Telegram notifications**: Notifications for automated trades
 
-## 🏗️ 系统架构
+## System Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      前端 (React + TS)                       │
-│                    http://localhost:5173                     │
-│  - 实时套利机会展示   - 持仓管理   - 历史数据分析            │
-└────────────────────┬────────────────────────────────────────┘
-                     │ WebSocket + REST API
-┌────────────────────┴────────────────────────────────────────┐
-│              Rust 后端 (Axum + Tokio)                        │
-│                http://localhost:8000                         │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │ 核心服务                                              │   │
-│  │  - ArbitrageService: 套利计算与协调                   │   │
-│  │  - WebSocketManager: 实时数据推送                     │   │
-│  │  - EventMatcher: 市场智能匹配                         │   │
-│  │  - ArbitrageCalculator: 利润率计算                    │   │
-│  │  - Storage: SQLite 数据持久化                         │   │
-│  └──────────────────────────────────────────────────────┘   │
-│  ┌──────────────────┐          ┌──────────────────┐         │
-│  │ Kalshi Client    │          │ Polymarket Client│         │
-│  │ - REST API       │          │ - REST API       │         │
-│  │ - WebSocket      │          │ - WebSocket      │         │
-│  │ - RSA 签名       │          │ - 以太坊签名     │         │
-│  └──────────────────┘          └──────────────────┘         │
-└────────────────────┬────────────────────────────────────────┘
-                     │ HTTP API
-┌────────────────────┴────────────────────────────────────────┐
-│         Python 下单服务 (FastAPI)                            │
-│              http://localhost:8001                           │
-│  - 使用官方 py-clob-client SDK                               │
-│  - 处理 Polymarket CLOB 订单签名和提交                       │
-└─────────────────────────────────────────────────────────────┘
+```text
++-------------------------------------------------------------+
+|                    Frontend (React + TS)                    |
+|                  http://localhost:5173                      |
+|  - Live arbitrage opportunities - Position management       |
+|  - Historical data analysis                                  |
++--------------------+----------------------------------------+
+                     | WebSocket + REST API
++--------------------+----------------------------------------+
+|                 Rust Backend (Axum + Tokio)                 |
+|                  http://localhost:8000                      |
+|  +-------------------------------------------------------+  |
+|  | Core services                                         |  |
+|  | - ArbitrageService: arbitrage calculation and control |  |
+|  | - WebSocketManager: live data delivery                |  |
+|  | - EventMatcher: intelligent market matching           |  |
+|  | - ArbitrageCalculator: profit-margin calculation      |  |
+|  | - Storage: SQLite persistence                         |  |
+|  +-------------------------------------------------------+  |
+|  +------------------+          +------------------------+ |
+|  | Kalshi client    |          | Polymarket US client   | |
+|  | - REST API       |          | - REST API             | |
+|  | - WebSocket      |          | - Ed25519 signing      | |
+|  | - RSA-PSS signing|          |                        | |
+|  +------------------+          +------------------------+ |
++-------------------------------------------------------------+
 ```
 
-### 技术栈
+Both exchanges are called directly from the Rust backend, each with its own
+signed request path - there is no separate order-service process.
 
-**后端 (Rust)**
-- Axum 0.7 - Web 框架
-- Tokio - 异步运行时
-- SQLite - 数据存储
-- Reqwest - HTTP 客户端
-- Alloy/RSA - 加密签名
+### Technology Stack
 
-**前端 (React)**
-- React 18 + TypeScript 5
-- Vite 5 - 构建工具
-- Tailwind CSS - 样式
-- Recharts - 数据可视化
+**Backend (Rust)**
 
-**下单服务 (Python)**
-- FastAPI - Web 框架
-- py-clob-client - Polymarket 官方 SDK
+- Axum 0.7 - web framework
+- Tokio - asynchronous runtime
+- SQLite - data storage
+- Reqwest - HTTP client
+- Alloy/RSA - cryptographic signing
 
-## 🚀 快速启动
+**Frontend (React)**
 
-### 1. 环境要求
+- React 18 and TypeScript 5
+- Vite 5 - build tool
+- Tailwind CSS - styling
+- Recharts - data visualization
+
+## Quick Start
+
+### 1. Prerequisites
 
 - Rust 1.70+
 - Node.js 16+
-- Python 3.8+
 
-### 2. 配置
+### 2. Configuration
 
 ```bash
 cd rust-backend
 cp config.example.toml config.toml
 ```
 
-编辑 `config.toml`：
+Edit `config.toml`:
 
 ```toml
 [kalshi]
@@ -90,11 +84,10 @@ YOUR_PRIVATE_KEY_HERE
 -----END RSA PRIVATE KEY-----"""
 
 [polymarket]
-# 从 https://reveal.magic.link/polymarket 获取
-private_key = "0xYOUR_PRIVATE_KEY"
-wallet_address = "0xYOUR_WALLET_ADDRESS"
-# Python 下单服务地址
-order_service_url = "http://127.0.0.1:8001"
+# Generate these at https://polymarket.us/developer.
+# This local config.toml file is ignored by Git.
+key_id = "your-polymarket-us-key-id"
+secret_key = "your-polymarket-us-secret-key"
 
 [auth]
 username = "admin"
@@ -102,16 +95,19 @@ password = "admin123"
 secret_key = "your-secret-key-min-32-chars"
 
 [settings]
-refresh_interval = 5          # 刷新间隔（秒）
-min_profit_margin = 1.0       # 最小利润率（%）
-default_bet_amount = 10.0     # 默认下注金额
-tracking_threshold = 2.0      # 追踪阈值（%）
+refresh_interval = 5          # Refresh interval (seconds)
+min_profit_margin = 1.0       # Minimum profit margin (%)
+default_bet_amount = 10.0     # Default bet amount
+tracking_threshold = 2.0      # Tracking threshold (%)
 
 [auto_trade]
-enabled = false               # 自动交易开关
-max_amount = 10.0            # 单次最大金额
-max_trade_count = 2          # 最大执行次数
-min_duration_ms = 500        # 最小持续时间
+# Auto-trade limits are persisted in SQLite and managed from the UI/API after
+# first startup. These values document the initial safe defaults.
+enabled = false               # Enable automatic trading
+max_amount = 10.0             # Maximum amount per trade
+max_trade_count = 2           # Maximum execution count
+min_duration_ms = 500         # Minimum opportunity duration
+neutralization_max_loss_cents = 5 # Maximum emergency-close loss per contract
 
 [telegram]
 enabled = false
@@ -119,26 +115,26 @@ bot_token = "YOUR_BOT_TOKEN"
 chat_id = "YOUR_CHAT_ID"
 ```
 
-### 3. 一键启动
+### 3. Start All Services
 
 ```bash
 ./start_rust_stack.sh
 ```
 
-自动启动：
-- Python 下单服务（端口 8001）
-- Rust 后端（端口 8000）
-- React 前端（端口 5173）
+The script starts:
 
-### 4. 访问应用
+- The Rust backend on port 8000
+- The React frontend on port 5173
 
-- **前端**: http://localhost:5173
-- **后端 API**: http://localhost:8000
-- **健康检查**: http://localhost:8000/api/health
+### 4. Access the Application
 
-默认登录：`admin` / `admin123`
+- **Frontend**: http://localhost:5173
+- **Backend API**: http://localhost:8000
+- **Health check**: http://localhost:8000/api/health
 
-## 📦 生产部署
+Default credentials: `admin` / `admin123`
+
+## Production Deployment
 
 ### Linux
 
@@ -148,7 +144,7 @@ scp polytaoli-linux-x86_64-*.tar.gz user@server:/path/
 tar -xzf polytaoli-linux-x86_64-*.tar.gz
 cd deploy
 cp config.example.toml config.toml
-# 编辑配置后启动
+# Edit the configuration, then start the application.
 ./start.sh
 ```
 
@@ -158,65 +154,94 @@ cp config.example.toml config.toml
 ./build_windows.sh
 ```
 
-## 🔧 核心功能
+## Core Functionality
 
-### 套利计算
-- 实时计算利润率（考虑手续费）
-- 自动选择最优策略（Yes-Yes/Yes-No/No-Yes/No-No）
-- 订单簿深度分析
+### Arbitrage Calculation
 
-### 市场匹配
-- 精确匹配：事件名称和问题描述
-- 模糊匹配：关键词和时间范围
-- NBA 特殊处理：智能识别比赛信息
+- Calculates profit margins in real time, including fees
+- Automatically selects the best strategy: Yes-Yes, Yes-No, No-Yes, or No-No
+- Analyzes order book depth
 
-### 自动交易
-- 持续时间阈值过滤
-- 可配置金额和次数限制
-- Telegram 实时通知
+### Market Matching
 
-### 数据管理
-- SQLite 存储套利历史
-- 实时性能指标监控
-- 持仓查询和管理
+- Exact matching by event name and question description
+- Fuzzy matching by keywords and time range
+- Specialized NBA handling that identifies game information intelligently
 
-## 📊 API 端点
+### Automated Trading
 
-| 端点 | 方法 | 描述 |
-|------|------|------|
-| `/api/health` | GET | 健康检查 |
-| `/api/login` | POST | 用户登录 |
-| `/api/settings` | GET/PUT | 设置管理 |
-| `/api/auto-trade` | GET/PUT | 自动交易配置 |
-| `/api/positions/kalshi` | GET | Kalshi 持仓 |
-| `/api/positions/polymarket` | GET | Polymarket 持仓 |
-| `/api/arbitrage/history` | GET | 套利历史 |
-| `/api/order/kalshi` | POST | Kalshi 下单 |
-| `/api/order/polymarket` | POST | Polymarket 下单 |
-| `/ws` | WebSocket | 实时数据推送 |
+- Uses a fresh executable Kalshi WebSocket order book and a freshly-fetched
+  Polymarket US market-book endpoint immediately before submission.
+- Sizes only whole contracts supported by both books, using worst-case fill
+  prices, Kalshi fees, the configured maximum amount, and the required profit
+  margin.
+- Uses IOC/FAK orders and treats a zero-fill acknowledgement as a failed leg.
+- Hedges complementary outcomes only: Kalshi YES is paired with Polymarket NO
+  for the tracked competitor, and Kalshi NO is paired with Polymarket YES.
+  The native Polymarket LONG/SHORT direction is resolved from that selected
+  competitor; it is never inferred from an outcome index.
+- Persists intent before submitting either leg and records each acknowledgement,
+  fill, cancellation, rejection, neutralization attempt, and residual exposure.
+- For mismatched fills, attempts an IOC/FAK offset only within the configured
+  `neutralization_max_loss_cents` bound (5 cents per contract by default).
+  If it cannot safely close the residual, it disables auto-trading and sends
+  the configured Telegram alert.
+- Disables auto-trading at startup if an execution was interrupted while its
+  status was `submitting`. Reconcile that record and every residual position
+  before manually re-enabling the bot.
 
-## 🔐 安全建议
+### Data Management
 
-1. 修改默认密码和 JWT 密钥
-2. 不要提交包含真实密钥的配置文件
-3. 生产环境使用 HTTPS（Nginx 反向代理）
-4. 限制端口访问来源
+- SQLite storage for arbitrage history
+- Real-time performance metric monitoring
+- Position retrieval and management
 
-## 📝 日志
+## API Endpoints
 
-日志位于 `rust-backend/logs/polytaoli.log.YYYY-MM-DD`，每天自动轮转。
+| Endpoint | Method | Description |
+| --- | --- | --- |
+| `/api/health` | GET | Health check |
+| `/api/auth/login` | POST | User authentication |
+| `/api/settings` | GET/PUT | Settings management |
+| `/api/auto-trade/status` | GET | Automated-trading state and limits |
+| `/api/auto-trade/enable`, `/api/auto-trade/disable` | POST | Change automated-trading state |
+| `/api/auto-trade/settings` | PUT | Update automated-trading limits |
+| `/api/auto-trade/history` | GET | Submission, fill, recovery, and residual-exposure history |
+| `/api/positions/kalshi` | GET | Kalshi positions |
+| `/api/positions/polymarket` | GET | Polymarket positions |
+| `/api/arbitrage-history` | GET | Arbitrage tracking history |
+| `/api/order/kalshi` | POST | Submit a Kalshi order |
+| `/api/order/polymarket` | POST | Submit a Polymarket US order |
+| `/ws` | WebSocket | Live data delivery |
+
+## Security Recommendations
+
+1. Change the default password and JWT secret.
+2. Never commit configuration files that contain real credentials.
+3. Use HTTPS with an Nginx reverse proxy in production.
+4. Restrict the sources that can access exposed ports.
+
+## Logs
+
+Logs are written to `rust-backend/logs/polytaoli.log.YYYY-MM-DD` and rotate daily.
 
 ```bash
 tail -f rust-backend/logs/polytaoli.log
 ```
 
-## 🐛 故障排查
+## Troubleshooting
 
-- **后端无法启动**: 检查配置文件格式和 API 密钥
-- **WebSocket 断连**: 确认后端运行状态和防火墙设置
-- **数据不更新**: 验证 API 密钥权限和网络连接
-- **自动交易未执行**: 检查利润率阈值和账户余额
+- **The backend will not start**: Check the configuration-file syntax and API credentials.
+- **WebSocket disconnects**: Confirm the backend is running and firewall settings allow access.
+- **Data is not updating**: Verify API-key permissions and network connectivity.
+- **Automated trades are not executing**: Check the history for a stale book,
+  insufficient executable depth, worst-case profit/amount rejection, or a
+  `submitting`/`exposed` record. Do not re-enable the bot while a residual
+  position or interrupted submission requires reconciliation.
+- **An execution is `exposed`**: The bot has halted after a one-leg or
+  unneutralized partial fill. Resolve the named exchange position manually,
+  verify the account position, and record the reconciliation before re-enabling.
 
 ---
 
-**免责声明**: 本软件仅供学习研究使用，交易风险自负。
+**Disclaimer**: This software is for educational and research purposes only. You assume all trading risk.

@@ -15,9 +15,11 @@ interface OrderLog {
 }
 
 export function PolyDebugOrder({ apiBaseUrl, onClose }: PolyDebugOrderProps) {
-  const [tokenId, setTokenId] = useState('');
+  const [marketSlug, setMarketSlug] = useState('');
+  const [positionSide, setPositionSide] = useState<'long' | 'short'>('long');
   const [side, setSide] = useState<'buy' | 'sell'>('buy');
-  const [amount, setAmount] = useState(1);
+  const [contracts, setContracts] = useState(1);
+  const [price, setPrice] = useState(0);
   const [loading, setLoading] = useState(false);
   const [logs, setLogs] = useState<OrderLog[]>([]);
 
@@ -30,8 +32,15 @@ export function PolyDebugOrder({ apiBaseUrl, onClose }: PolyDebugOrderProps) {
   const clearLogs = () => setLogs([]);
 
   const handleOrder = async () => {
-    if (!tokenId.trim()) {
-      addLog('error', 'Token ID 不能为空');
+    if (
+      !marketSlug.trim()
+      || !Number.isInteger(contracts)
+      || contracts <= 0
+      || !Number.isFinite(price)
+      || price <= 0
+      || price >= 1
+    ) {
+      addLog('error', 'A market slug, positive whole contract count, and reference price between $0.00 and $1.00 are required');
       return;
     }
 
@@ -39,54 +48,42 @@ export function PolyDebugOrder({ apiBaseUrl, onClose }: PolyDebugOrderProps) {
     clearLogs();
 
     const request = {
-      token_id: tokenId.trim(),
+      market_slug: marketSlug.trim(),
+      position_side: positionSide,
       side,
-      amount,
+      contracts,
+      price,
     };
 
-    addLog('request', '发送下单请求', request);
+    addLog('request', 'Sending order request', request);
 
     try {
       const startTime = Date.now();
       const response = await createPolymarketOrder(apiBaseUrl, request);
       const elapsed = Date.now() - startTime;
 
-      addLog('response', `收到响应 (${elapsed}ms)`, response);
+      addLog('response', `Response received (${elapsed}ms)`, response);
 
       if (response.success) {
-        addLog('response', `✅ 下单成功! order_id=${response.order_id || 'N/A'}`);
+        addLog('response', `✅ Order succeeded! order_id=${response.order_id || 'N/A'}`);
       } else {
-        addLog('error', `❌ 下单失败: ${response.error || '未知错误'}`);
+        addLog('error', `❌ Order failed: ${response.error || 'Unknown error'}`);
       }
     } catch (e) {
-      addLog('error', `❌ 请求异常: ${e instanceof Error ? e.message : '未知错误'}`);
+      addLog('error', `❌ Request error: ${e instanceof Error ? e.message : 'Unknown error'}`);
     } finally {
       setLoading(false);
     }
   };
 
-  // 预设的测试 token (CHI-MIA 比赛)
-  const presetTokens = [
-    { 
-      name: 'CHI-MIA (CHI Yes)', 
-      token: '94515776290373751754638142228993059501097351216445649452643423016914071837398',
-      description: 'Chicago Bulls 胜利'
-    },
-    { 
-      name: 'PHX-WAS (WAS Yes)', 
-      token: '113640777070257914779167991695197859988168871541269340805216299248113189823953',
-      description: 'Washington Wizards 胜利'
-    },
-  ];
-
   return (
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
       <div className="bg-[--bg-secondary] rounded-lg border border-[--border-color] w-full max-w-2xl max-h-[90vh] flex flex-col">
-        {/* 标题栏 */}
+        {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-[--border-color]">
           <div className="flex items-center gap-2">
             <span className="text-lg">🔧</span>
-            <h2 className="text-sm font-medium text-[--text-primary]">Polymarket 手动下单调试</h2>
+            <h2 className="text-sm font-medium text-[--text-primary]">Polymarket Manual Order Debug</h2>
           </div>
           <button
             onClick={onClose}
@@ -96,48 +93,63 @@ export function PolyDebugOrder({ apiBaseUrl, onClose }: PolyDebugOrderProps) {
           </button>
         </div>
 
-        {/* 内容区 */}
+        {/* Content */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          {/* 预设 Token */}
-          <div className="bg-[--bg-tertiary] rounded p-3">
-            <div className="text-xs text-[--text-muted] mb-2">快速选择 Token</div>
-            <div className="flex flex-wrap gap-2">
-              {presetTokens.map((preset) => (
-                <button
-                  key={preset.token}
-                  onClick={() => setTokenId(preset.token)}
-                  className={`px-2 py-1 text-xs rounded border ${
-                    tokenId === preset.token
-                      ? 'border-purple-500 bg-purple-500/20 text-purple-400'
-                      : 'border-[--border-color] bg-[--bg-secondary] text-[--text-secondary] hover:bg-[--bg-primary]'
-                  }`}
-                  title={preset.description}
-                >
-                  {preset.name}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Token ID 输入 */}
+          {/* Market slug input */}
           <div className="space-y-2">
-            <label className="text-xs text-[--text-muted]">Token ID</label>
+            <label className="text-xs text-[--text-muted]">Market Slug</label>
             <input
               type="text"
-              value={tokenId}
-              onChange={(e) => setTokenId(e.target.value)}
-              placeholder="输入 Polymarket Token ID..."
+              value={marketSlug}
+              onChange={(e) => setMarketSlug(e.target.value)}
+              placeholder="Enter Polymarket US market slug..."
               className="w-full px-3 py-2 text-xs bg-[--bg-tertiary] border border-[--border-color] rounded text-[--text-primary] placeholder:text-[--text-muted] font-mono"
             />
-            {tokenId && (
+            {marketSlug && (
               <div className="text-[10px] text-[--text-muted] font-mono break-all">
-                {tokenId.slice(0, 30)}...{tokenId.slice(-10)}
+                {marketSlug}
               </div>
             )}
           </div>
 
-          {/* 下单参数 */}
+          {/* Order parameters */}
           <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <label className="text-xs text-[--text-muted]">Position</label>
+              <div className="flex gap-2">
+                {(['long', 'short'] as const).map((value) => (
+                  <button
+                    key={value}
+                    onClick={() => setPositionSide(value)}
+                    className={`flex-1 py-2 text-xs rounded ${
+                      positionSide === value
+                        ? 'bg-purple-500/20 text-purple-400 border border-purple-500'
+                        : 'bg-[--bg-tertiary] text-[--text-secondary] border border-[--border-color]'
+                    }`}
+                  >
+                    {value.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-xs text-[--text-muted]">Limit Price (USD)</label>
+                <input
+                  type="number"
+                  min={0.01}
+                  max={0.99}
+                  step={0.01}
+                  value={price || ''}
+                  onChange={(e) => setPrice(parseFloat(e.target.value) || 0)}
+                  placeholder="0.19"
+                  className="w-full h-8 px-2 text-center text-xs bg-[--bg-tertiary] border border-[--border-color] rounded text-[--text-primary]"
+                />
+                <div className="text-[10px] text-[--text-muted]">
+                  The order will rest at this limit price until filled or canceled.
+                </div>
+              </div>
+            </div>
+
             {/* Side */}
             <div className="space-y-2">
               <label className="text-xs text-[--text-muted]">Side</label>
@@ -165,72 +177,72 @@ export function PolyDebugOrder({ apiBaseUrl, onClose }: PolyDebugOrderProps) {
               </div>
             </div>
 
-            {/* Amount */}
+            {/* Contract count */}
             <div className="space-y-2">
-              <label className="text-xs text-[--text-muted]">Amount (USDC)</label>
+              <label className="text-xs text-[--text-muted]">Contracts</label>
               <div className="flex items-center gap-2">
                 <button
-                  onClick={() => setAmount(Math.max(0.1, amount - 1))}
+                  onClick={() => setContracts(Math.max(1, contracts - 1))}
                   className="w-8 h-8 rounded bg-[--bg-tertiary] text-[--text-secondary] hover:bg-[--bg-primary] border border-[--border-color]"
                 >
                   -
                 </button>
                 <input
                   type="number"
-                  min={0.1}
-                  step={0.1}
-                  value={amount}
-                  onChange={(e) => setAmount(Math.max(0.1, parseFloat(e.target.value) || 0.1))}
+                  min={1}
+                  step={1}
+                  value={contracts}
+                  onChange={(e) => setContracts(Math.max(1, parseInt(e.target.value) || 1))}
                   className="flex-1 h-8 px-2 text-center text-xs bg-[--bg-tertiary] border border-[--border-color] rounded text-[--text-primary]"
                 />
                 <button
-                  onClick={() => setAmount(amount + 1)}
+                  onClick={() => setContracts(contracts + 1)}
                   className="w-8 h-8 rounded bg-[--bg-tertiary] text-[--text-secondary] hover:bg-[--bg-primary] border border-[--border-color]"
                 >
                   +
                 </button>
               </div>
               <div className="flex gap-1">
-                {[0.5, 1, 2, 5, 10].map((v) => (
+                {[1, 2, 5, 10, 25].map((v) => (
                   <button
                     key={v}
-                    onClick={() => setAmount(v)}
+                    onClick={() => setContracts(v)}
                     className={`flex-1 py-1 text-[10px] rounded ${
-                      amount === v
+                      contracts === v
                         ? 'bg-purple-500/20 text-purple-400'
                         : 'bg-[--bg-tertiary] text-[--text-muted] hover:text-[--text-secondary]'
                     }`}
                   >
-                    ${v}
+                    {v}
                   </button>
                 ))}
               </div>
             </div>
           </div>
 
-          {/* 下单按钮 */}
+          {/* Order button */}
           <button
             onClick={handleOrder}
-            disabled={loading || !tokenId.trim()}
+            disabled={loading || !marketSlug.trim() || !Number.isInteger(contracts) || contracts <= 0 || price <= 0 || price >= 1}
             className="w-full py-3 text-sm font-medium rounded bg-gradient-to-r from-purple-500 to-violet-500 text-white hover:from-purple-600 hover:to-violet-600 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {loading ? '执行中...' : `🚀 执行 ${side.toUpperCase()} $${amount}`}
+            {loading ? 'Executing...' : `🚀 Execute ${side.toUpperCase()} ${contracts} Contract${contracts === 1 ? '' : 's'}`}
           </button>
 
-          {/* 日志区域 */}
+          {/* Log area */}
           <div className="bg-[--bg-tertiary] rounded">
             <div className="flex items-center justify-between px-3 py-2 border-b border-[--border-color]">
-              <span className="text-xs text-[--text-muted]">📋 执行日志</span>
+              <span className="text-xs text-[--text-muted]">📋 Execution Log</span>
               <button
                 onClick={clearLogs}
                 className="text-[10px] text-[--text-muted] hover:text-[--text-secondary]"
               >
-                清空
+                Clear
               </button>
             </div>
             <div className="p-2 max-h-64 overflow-y-auto font-mono text-[10px] space-y-1">
               {logs.length === 0 ? (
-                <div className="text-[--text-muted] text-center py-4">等待执行...</div>
+                <div className="text-[--text-muted] text-center py-4">Waiting to execute...</div>
               ) : (
                 logs.map((log, i) => (
                   <div key={i} className="space-y-1">
@@ -260,14 +272,14 @@ export function PolyDebugOrder({ apiBaseUrl, onClose }: PolyDebugOrderProps) {
             </div>
           </div>
 
-          {/* 提示信息 */}
+          {/* Tips */}
           <div className="bg-yellow-500/10 border border-yellow-500/20 rounded p-3 text-xs text-yellow-400">
-            <div className="font-medium mb-1">💡 调试提示</div>
+            <div className="font-medium mb-1">💡 Debug Tips</div>
             <ul className="list-disc list-inside space-y-0.5 text-[10px] text-yellow-400/80">
-              <li>下单后请查看后端日志获取详细的签名和请求信息</li>
-              <li>如果报错 "Invalid order payload"，可能是 neg_risk 设置不正确</li>
-              <li>CHI-MIA 比赛的 token 可能需要特殊的 neg_risk 设置</li>
-              <li>建议先用小金额 ($0.5-$1) 测试</li>
+              <li>After placing an order, check the backend logs for detailed signing and request information.</li>
+              <li>Use the native market slug and the gateway-provided LONG or SHORT position.</li>
+              <li>Do not use CLOB token IDs or infer the position from an outcome index.</li>
+              <li>Test with one contract first.</li>
             </ul>
           </div>
         </div>

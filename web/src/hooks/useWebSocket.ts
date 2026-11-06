@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { WsMessage, LogEntry, DataCoverage, MatchedMarketData, MetricsReport } from '../types';
+import { WsMessage, LogEntry, DataCoverage, MatchedMarketData, MetricsReport, MentionSignalRow, MentionStatus } from '../types';
 
 export function useWebSocket(url: string) {
-  const [matchedMarkets, setMatchedMarkets] = useState<MatchedMarketData[]>([]); // 所有匹配市场（包含套利信息）
+  const [matchedMarkets, setMatchedMarkets] = useState<MatchedMarketData[]>([]); // All matched markets, including arbitrage information
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [isConnected, setIsConnected] = useState(false);
-  const [isReceivingData, setIsReceivingData] = useState(false); // 是否正在接收实时数据
-  const [lastUpdateTime, setLastUpdateTime] = useState<Date | null>(null); // 最后更新时间
-  const [updateCount, setUpdateCount] = useState(0); // 更新计数，用于触发动画
+  const [isReceivingData, setIsReceivingData] = useState(false); // Whether real-time data is being received
+  const [lastUpdateTime, setLastUpdateTime] = useState<Date | null>(null); // Last update time
+  const [updateCount, setUpdateCount] = useState(0); // Update count used to trigger animations
   const [stats, setStats] = useState({
     kalshiCount: 0,
     polymarketCount: 0,
@@ -24,14 +24,21 @@ export function useWebSocket(url: string) {
     full_coverage: '0/0',
     kalshi_connected: false,
     polymarket_connected: false,
+    kalshi_source: 'rest_polling',
+    polymarket_source: 'rest_polling',
   });
   const [metrics, setMetrics] = useState<MetricsReport | null>(null);
+  const [mentionSignals, setMentionSignals] = useState<MentionSignalRow[]>([]);
+  const [mentionStatus, setMentionStatus] = useState<MentionStatus | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  // 跟踪价格变化用于高亮动画
+  // Track price changes for highlight animations.
   const prevPricesRef = useRef<Map<string, { k_yes: number; k_no: number; p_yes: number; p_no: number }>>(new Map());
 
   useEffect(() => {
-    // 将 addLog 移到 useEffect 内部，避免闭包陷阱
+    let disposed = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+
+    // Keep addLog inside the effect to avoid stale closures.
     const addLog = (level: LogEntry['level'], message: string) => {
       const entry: LogEntry = {
         time: new Date().toISOString(),
@@ -40,28 +47,28 @@ export function useWebSocket(url: string) {
       };
       setLogs((prev) => {
         const newLogs = [entry, ...prev];
-        return newLogs.slice(0, 100); // 保留最近100条
+        return newLogs.slice(0, 100); // Keep the 100 most recent entries
       });
     };
 
-    // 将 handleMessage 移到 useEffect 内部，解决闭包陷阱
+    // Keep handleMessage inside the effect to avoid stale closures.
     const handleMessage = (message: WsMessage) => {
       switch (message.type) {
         case 'opportunity':
-          // Rust 后端发送单个套利机会
+          // The Rust backend sent a single arbitrage opportunity.
           if (message.data) {
             const opp = message.data as any;
-            addLog('success', `发现套利机会: ${opp.event_name} ${opp.team_name} - ${opp.profit_margin.toFixed(2)}%`);
+            addLog('success', `Arbitrage opportunity found: ${opp.event_name} ${opp.team_name} - ${opp.profit_margin.toFixed(2)}%`);
           }
           break;
 
         case 'opportunities':
-          // Rust 后端发送套利机会列表
+          // The Rust backend sent an arbitrage opportunity list.
           if (message.data && Array.isArray(message.data)) {
             setIsReceivingData(true);
             const opportunities = message.data as any[];
             
-            // 更新统计
+            // Update statistics.
             setStats((prev) => ({
               ...prev,
               opportunitiesCount: opportunities.length,
@@ -73,7 +80,7 @@ export function useWebSocket(url: string) {
           break;
 
         case 'stats':
-          // Rust 后端发送系统统计
+          // The Rust backend sent system statistics.
           if (message.data) {
             const statsData = message.data as any;
             setStats({
@@ -92,13 +99,13 @@ export function useWebSocket(url: string) {
           break;
 
         case 'matched_markets_list':
-          // 兼容旧的 Python 后端消息格式（如果有）
+          // Support the legacy Python backend message format, if present.
           if (message.data && Array.isArray(message.data)) {
             setIsReceivingData(true);
             const marketsData = message.data as MatchedMarketData[];
             
-            // 检测价格变化，用于高亮动画
-            // 使用更唯一的 key：kalshi_market_id + polymarket_market_id
+            // Detect price changes for highlight animations.
+            // Use a more unique key: kalshi_market_id + polymarket_market_id.
             const newPricesMap = new Map<string, { k_yes: number; k_no: number; p_yes: number; p_no: number; changed: boolean }>();
             marketsData.forEach((m) => {
               const key = `${m.kalshi_market_id}_${m.polymarket_market_id}`;
@@ -125,7 +132,7 @@ export function useWebSocket(url: string) {
             setLastUpdateTime(new Date());
             setUpdateCount((prev) => prev + 1);
             
-            // 更新统计
+            // Update statistics.
             if (message.count !== undefined) {
               setStats((prev) => ({
                 ...prev,
@@ -137,9 +144,16 @@ export function useWebSocket(url: string) {
           break;
 
         case 'metrics':
-          // 处理性能指标消息
+          // Process performance metrics messages.
           if (message.data && typeof message.data === 'object' && 'api_latency' in message.data) {
             setMetrics(message.data as MetricsReport);
+          }
+          break;
+
+        case 'mention_signals':
+          if (Array.isArray(message.data)) {
+            setMentionSignals(message.data as MentionSignalRow[]);
+            if (message.status) setMentionStatus(message.status);
           }
           break;
 
@@ -153,34 +167,39 @@ export function useWebSocket(url: string) {
       wsRef.current = ws;
 
       ws.onopen = () => {
-        console.log('WebSocket 连接已建立');
+        console.log('WebSocket connection established');
         setIsConnected(true);
-        addLog('success', 'WebSocket 连接成功');
+        addLog('success', 'WebSocket connected');
       };
 
       ws.onmessage = (event) => {
         try {
           const message: WsMessage = JSON.parse(event.data);
-          console.log('收到 WebSocket 消息:', message.type, message);
+          console.log('WebSocket message received:', message.type, message);
           handleMessage(message);
         } catch (error) {
-          console.error('解析 WebSocket 消息失败:', error);
+          console.error('Failed to parse WebSocket message:', error);
         }
       };
 
       ws.onerror = (error) => {
-        console.error('WebSocket 错误:', error);
-        addLog('error', 'WebSocket 连接错误');
+        console.error('WebSocket error:', error);
+        addLog('error', 'WebSocket connection error');
       };
 
       ws.onclose = () => {
-        console.log('WebSocket 连接已关闭');
+        if (disposed) {
+          return;
+        }
+        console.log('WebSocket connection closed');
         setIsConnected(false);
-        addLog('warning', 'WebSocket 连接断开，5秒后重连...');
+        addLog('warning', 'WebSocket disconnected; reconnecting in 5 seconds...');
         
-        // 5秒后重连
-        setTimeout(() => {
-          connect();
+        // Reconnect after five seconds.
+        reconnectTimer = setTimeout(() => {
+          if (!disposed) {
+            connect();
+          }
         }, 5000);
       };
     };
@@ -188,17 +207,22 @@ export function useWebSocket(url: string) {
     connect();
 
     return () => {
+      disposed = true;
+      if (reconnectTimer !== undefined) {
+        clearTimeout(reconnectTimer);
+      }
       if (wsRef.current) {
         wsRef.current.close();
+        wsRef.current = null;
       }
     };
   }, [url]);
 
-  // 定期获取数据覆盖率
+  // Fetch data coverage periodically.
   useEffect(() => {
     const fetchCoverage = async () => {
       try {
-        // 从 ws url 推断 api url
+        // Infer the API URL from the WebSocket URL.
         const apiUrl = url.replace('ws://', 'http://').replace('wss://', 'https://').replace('/ws', '');
         const response = await fetch(`${apiUrl}/api/data-coverage`);
         if (response.ok) {
@@ -206,13 +230,13 @@ export function useWebSocket(url: string) {
           setDataCoverage(data);
         }
       } catch (error) {
-        // 静默失败
+        // Fail silently.
       }
     };
 
-    // 初始获取
+    // Fetch initially.
     fetchCoverage();
-    // 每 3 秒更新一次
+    // Refresh every three seconds.
     const interval = setInterval(fetchCoverage, 3000);
     return () => clearInterval(interval);
   }, [url]);
@@ -227,5 +251,7 @@ export function useWebSocket(url: string) {
     stats,
     dataCoverage,
     metrics,
+    mentionSignals,
+    mentionStatus,
   };
 }

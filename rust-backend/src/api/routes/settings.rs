@@ -2,12 +2,7 @@
 
 use std::sync::Arc;
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
@@ -31,7 +26,7 @@ pub struct AppSettingsResponse {
 pub async fn get_app_settings(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let service = state.service.read().await;
     let storage = service.ws_manager.get_storage();
-    
+
     match storage.get_app_settings() {
         Ok(settings) => Json(AppSettingsResponse {
             refresh_interval: settings.refresh_interval,
@@ -39,15 +34,17 @@ pub async fn get_app_settings(State(state): State<Arc<AppState>>) -> impl IntoRe
             default_bet_amount: settings.default_bet_amount,
             tracking_threshold: settings.tracking_threshold,
             updated_at: settings.updated_at,
-        }).into_response(),
+        })
+        .into_response(),
         Err(e) => {
-            error!("获取应用设置失败: {}", e);
+            error!("获取应用设置失败: {:#}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
                     "error": e.to_string()
-                }))
-            ).into_response()
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -71,7 +68,7 @@ pub async fn update_app_settings(
     Json(req): Json<AppSettingsRequest>,
 ) -> impl IntoResponse {
     let service = state.service.read().await;
-    
+
     match service.ws_manager.update_app_settings(
         req.refresh_interval,
         req.min_profit_margin,
@@ -81,16 +78,18 @@ pub async fn update_app_settings(
         Ok(_) => Json(serde_json::json!({
             "success": true,
             "message": "应用设置已更新"
-        })).into_response(),
+        }))
+        .into_response(),
         Err(e) => {
-            error!("更新应用设置失败: {}", e);
+            error!("更新应用设置失败: {:#}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
                     "success": false,
                     "error": e.to_string()
-                }))
-            ).into_response()
+                })),
+            )
+                .into_response()
         }
     }
 }

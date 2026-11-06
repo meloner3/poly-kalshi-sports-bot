@@ -11,9 +11,9 @@ export function formatPercent(percent: number): string {
 }
 
 export function formatDateTime(dateString?: string): string {
-  if (!dateString) return '未知';
+  if (!dateString) return 'Unknown';
   const date = new Date(dateString);
-  return date.toLocaleString('zh-CN', {
+  return date.toLocaleString('en-US', {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
@@ -29,9 +29,9 @@ export function truncateString(str: string, maxLen: number): string {
 export function getArbitrageTypeLabel(type: string): string {
   switch (type) {
     case 'KalshiYesPolymarketNo':
-      return 'K买Yes + P买No';
+      return 'K Buy Yes + P Buy No';
     case 'KalshiNoPolymarketYes':
-      return 'K买No + P买Yes';
+      return 'K Buy No + P Buy Yes';
     default:
       return type;
   }

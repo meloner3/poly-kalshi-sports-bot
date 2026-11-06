@@ -30,11 +30,87 @@ interface HeaderProps {
   username?: string | null;
 }
 
+const AUTO_REFRESH_STORAGE_KEY = 'polytaoli_auto_refresh';
+const MIN_AUTO_REFRESH_SECONDS = 5;
+
 export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastUpdateTime, updateCount, dataCoverage, metrics, apiBaseUrl, onLogout, username }: HeaderProps) {
   const [isFlashing, setIsFlashing] = useState(false);
   const [accountBalance, setAccountBalance] = useState<AccountBalance | null>(null);
+
+  // Auto-refresh: reload the whole page on a user-configurable interval.
+  // Persisted to localStorage since a page reload wipes React state.
+  const [refreshSecondsInput, setRefreshSecondsInput] = useState('30');
+  const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(false);
+  const [refreshCountdown, setRefreshCountdown] = useState<number | null>(null);
+
+  // Load the saved auto-refresh preference once on mount.
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(AUTO_REFRESH_STORAGE_KEY);
+      if (!saved) return;
+      const parsed = JSON.parse(saved);
+      if (typeof parsed.seconds === 'number' && parsed.seconds >= MIN_AUTO_REFRESH_SECONDS) {
+        setRefreshSecondsInput(String(parsed.seconds));
+      }
+      if (parsed.enabled) {
+        setAutoRefreshEnabled(true);
+      }
+    } catch {
+      // Private browsing or blocked storage - auto-refresh just stays off.
+    }
+  }, []);
+
+  // Persist the preference whenever it changes.
+  useEffect(() => {
+    try {
+      const seconds = parseInt(refreshSecondsInput);
+      localStorage.setItem(
+        AUTO_REFRESH_STORAGE_KEY,
+        JSON.stringify({
+          enabled: autoRefreshEnabled,
+          seconds: isNaN(seconds) ? 30 : seconds,
+        })
+      );
+    } catch {
+      // Ignore - not critical if the preference doesn't persist.
+    }
+  }, [autoRefreshEnabled, refreshSecondsInput]);
+
+  // Drive the countdown and trigger the reload when it hits zero.
+  useEffect(() => {
+    if (!autoRefreshEnabled) {
+      setRefreshCountdown(null);
+      return;
+    }
+    const seconds = parseInt(refreshSecondsInput);
+    if (isNaN(seconds) || seconds < MIN_AUTO_REFRESH_SECONDS) {
+      return;
+    }
+    setRefreshCountdown(seconds);
+    const tick = setInterval(() => {
+      setRefreshCountdown((prev) => {
+        if (prev === null) return null;
+        if (prev <= 1) {
+          window.location.reload();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(tick);
+  }, [autoRefreshEnabled, refreshSecondsInput]);
+
+  const handleManualRefresh = () => window.location.reload();
+
+  const handleToggleAutoRefresh = () => {
+    const seconds = parseInt(refreshSecondsInput);
+    if (!autoRefreshEnabled && (isNaN(seconds) || seconds < MIN_AUTO_REFRESH_SECONDS)) {
+      return;
+    }
+    setAutoRefreshEnabled((prev) => !prev);
+  };
   
-  // 自动下单状态
+  // Automated trading state
   const [autoTradeStatus, setAutoTradeStatus] = useState<AutoTradeStatus | null>(null);
   const [showAutoTradeModal, setShowAutoTradeModal] = useState(false);
   const [autoTradeLoading, setAutoTradeLoading] = useState(false);
@@ -42,34 +118,45 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
   const [maxTradeCountInput, setMaxTradeCountInput] = useState('2');
   const [maxContractsInput, setMaxContractsInput] = useState('100');
   const [minContractsInput, setMinContractsInput] = useState('10');
+  const [neutralizationLossInput, setNeutralizationLossInput] = useState('5');
   const [autoTradeMessage, setAutoTradeMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
-  // 应用设置状态
+  // Application settings state
   const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
-  // 编辑用的临时值
+  // Temporary values used for editing
   const [editRefreshInterval, setEditRefreshInterval] = useState('5');
   const [editMinProfit, setEditMinProfit] = useState('1.0');
   const [editDefaultBet, setEditDefaultBet] = useState('10');
   const [editTrackingThreshold, setEditTrackingThreshold] = useState('2.0');
 
-  // 获取自动下单状态
+  // Fetch automated trading status. This runs on a 2s poll for the live
+  // read-only display (autoTradeStatus.*) - it must not also overwrite the
+  // editable input fields below on every tick, or a poll landing mid-edit
+  // silently reverts whatever the user is typing before they can submit it.
+  // Only seed the inputs from the server on the very first load; after that,
+  // an input only changes when the user edits it or a save round-trips.
   const fetchAutoTradeStatus = useCallback(async () => {
     try {
       const data = await getAutoTradeStatus(apiBaseUrl);
-      setAutoTradeStatus(data);
-      setDurationInput(String(data.min_duration_ms));
-      setMaxTradeCountInput(String(data.max_trade_count));
-      setMaxContractsInput(String(data.max_contracts));
-      setMinContractsInput(String(data.min_contracts));
+      setAutoTradeStatus((prev) => {
+        if (prev === null) {
+          setDurationInput(String(data.min_duration_ms));
+          setMaxTradeCountInput(String(data.max_trade_count));
+          setMaxContractsInput(String(data.max_contracts));
+          setMinContractsInput(String(data.min_contracts));
+          setNeutralizationLossInput(String(data.neutralization_max_loss_cents));
+        }
+        return data;
+      });
     } catch (error) {
-      console.error('获取自动下单状态失败:', error);
+      console.error('Failed to fetch automated trading status:', error);
     }
   }, [apiBaseUrl]);
 
-  // 获取应用设置
+  // Fetch application settings.
   const fetchAppSettings = useCallback(async () => {
     try {
       const data = await getAppSettings(apiBaseUrl);
@@ -79,55 +166,55 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
       setEditDefaultBet(String(data.default_bet_amount));
       setEditTrackingThreshold(String(data.tracking_threshold));
     } catch (error) {
-      console.error('获取应用设置失败:', error);
+      console.error('Failed to fetch application settings:', error);
     }
   }, [apiBaseUrl]);
 
-  // 定期刷新自动下单状态
+  // Refresh automated trading status periodically.
   useEffect(() => {
     fetchAutoTradeStatus();
     const interval = setInterval(fetchAutoTradeStatus, 2000);
     return () => clearInterval(interval);
   }, [fetchAutoTradeStatus]);
 
-  // 初始加载应用设置
+  // Load application settings initially.
   useEffect(() => {
     fetchAppSettings();
   }, [fetchAppSettings]);
 
-  // 显示消息
+  // Show an automated trading message.
   const showAutoTradeMsg = (text: string, type: 'success' | 'error') => {
     setAutoTradeMessage({ text, type });
     setTimeout(() => setAutoTradeMessage(null), 3000);
   };
 
-  // 显示设置消息
+  // Show an application settings message.
   const showSettingsMsg = (text: string, type: 'success' | 'error') => {
     setSettingsMessage({ text, type });
     setTimeout(() => setSettingsMessage(null), 3000);
   };
 
-  // 更新应用设置
+  // Update application settings.
   const handleUpdateSettings = async () => {
     const refreshInterval = parseInt(editRefreshInterval);
     const minProfit = parseFloat(editMinProfit);
     const defaultBet = parseFloat(editDefaultBet);
     const trackingThreshold = parseFloat(editTrackingThreshold);
 
-    if (isNaN(refreshInterval) || refreshInterval < 1) {
-      showSettingsMsg('刷新间隔至少1秒', 'error');
+    if (isNaN(refreshInterval) || refreshInterval < 5) {
+      showSettingsMsg('Refresh interval must be at least 5 seconds', 'error');
       return;
     }
     if (isNaN(minProfit) || minProfit < 0) {
-      showSettingsMsg('最小利润率不能为负', 'error');
+      showSettingsMsg('Minimum profit margin cannot be negative', 'error');
       return;
     }
     if (isNaN(defaultBet) || defaultBet <= 0) {
-      showSettingsMsg('默认金额必须大于0', 'error');
+      showSettingsMsg('Default amount must be greater than 0', 'error');
       return;
     }
     if (isNaN(trackingThreshold) || trackingThreshold < 0) {
-      showSettingsMsg('追踪阈值不能为负', 'error');
+      showSettingsMsg('Tracking threshold cannot be negative', 'error');
       return;
     }
 
@@ -140,91 +227,91 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
         tracking_threshold: trackingThreshold,
       });
       if (result.success) {
-        showSettingsMsg('设置已保存（重启后完全生效）', 'success');
+        showSettingsMsg('Settings saved (fully applied after restart)', 'success');
         await fetchAppSettings();
       } else {
-        showSettingsMsg(result.error || '保存失败', 'error');
+        showSettingsMsg(result.error || 'Failed to save settings', 'error');
       }
     } catch (error) {
-      showSettingsMsg('保存失败', 'error');
+      showSettingsMsg('Failed to save settings', 'error');
     }
     setSettingsLoading(false);
   };
 
-  // 切换自动下单开关
+  // Toggle automated trading.
   const handleAutoTradeToggle = async () => {
     if (!autoTradeStatus) return;
     setAutoTradeLoading(true);
     try {
       if (autoTradeStatus.enabled) {
         const result = await disableAutoTrade(apiBaseUrl);
-        if (result.success) showAutoTradeMsg('已关闭自动下单', 'success');
-        else showAutoTradeMsg(result.error || '操作失败', 'error');
+        if (result.success) showAutoTradeMsg('Automated trading disabled', 'success');
+        else showAutoTradeMsg(result.error || 'Operation failed', 'error');
       } else {
         const result = await enableAutoTrade(apiBaseUrl);
-        if (result.success) showAutoTradeMsg('已开启自动下单', 'success');
-        else showAutoTradeMsg(result.error || '操作失败', 'error');
+        if (result.success) showAutoTradeMsg('Automated trading enabled', 'success');
+        else showAutoTradeMsg(result.error || 'Operation failed', 'error');
       }
       await fetchAutoTradeStatus();
     } catch (error) {
-      showAutoTradeMsg('操作失败', 'error');
+      showAutoTradeMsg('Operation failed', 'error');
     }
     setAutoTradeLoading(false);
   };
 
-  // 重置次数
+  // Reset the trade count.
   const handleAutoTradeReset = async () => {
     setAutoTradeLoading(true);
     try {
       const result = await resetAutoTradeCount(apiBaseUrl);
-      if (result.success) showAutoTradeMsg('次数已重置', 'success');
-      else showAutoTradeMsg(result.error || '重置失败', 'error');
+      if (result.success) showAutoTradeMsg('Trade count reset', 'success');
+      else showAutoTradeMsg(result.error || 'Failed to reset trade count', 'error');
       await fetchAutoTradeStatus();
     } catch (error) {
-      showAutoTradeMsg('重置失败', 'error');
+      showAutoTradeMsg('Failed to reset trade count', 'error');
     }
     setAutoTradeLoading(false);
   };
 
-  // 更新持续时间阈值
+  // Update the duration threshold.
   const handleUpdateDuration = async () => {
     const duration = parseInt(durationInput);
     if (isNaN(duration) || duration < 0) {
-      showAutoTradeMsg('请输入有效的时间', 'error');
+      showAutoTradeMsg('Enter a valid duration', 'error');
       return;
     }
     setAutoTradeLoading(true);
     try {
       const result = await updateAutoTradeSettings(apiBaseUrl, { min_duration_ms: duration });
-      if (result.success) showAutoTradeMsg('设置已更新', 'success');
-      else showAutoTradeMsg(result.error || '更新失败', 'error');
+      if (result.success) showAutoTradeMsg('Settings updated', 'success');
+      else showAutoTradeMsg(result.error || 'Failed to update settings', 'error');
       await fetchAutoTradeStatus();
     } catch (error) {
-      showAutoTradeMsg('更新失败', 'error');
+      showAutoTradeMsg('Failed to update settings', 'error');
     }
     setAutoTradeLoading(false);
   };
 
-  // 更新最大下单次数
+  // Update the maximum number of trades.
   const handleUpdateMaxTradeCount = async () => {
     const count = parseInt(maxTradeCountInput);
     if (isNaN(count) || count < 1) {
-      showAutoTradeMsg('请输入有效的次数（≥1）', 'error');
+      showAutoTradeMsg('Enter a valid trade count (≥1)', 'error');
       return;
     }
     setAutoTradeLoading(true);
     try {
       const result = await updateAutoTradeSettings(apiBaseUrl, { max_trade_count: count });
-      if (result.success) showAutoTradeMsg('最大次数已更新', 'success');
-      else showAutoTradeMsg(result.error || '更新失败', 'error');
+      if (result.success) showAutoTradeMsg('Maximum trade count updated', 'success');
+      else showAutoTradeMsg(result.error || 'Failed to update settings', 'error');
       await fetchAutoTradeStatus();
     } catch (error) {
-      showAutoTradeMsg('更新失败', 'error');
+      showAutoTradeMsg('Failed to update settings', 'error');
     }
     setAutoTradeLoading(false);
   };
 
-  // 切换灵活下单模式
+  // Toggle flexible order sizing.
   const handleToggleFlexibleMode = async () => {
     if (!autoTradeStatus) return;
     setAutoTradeLoading(true);
@@ -234,58 +321,78 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
       });
       if (result.success) {
         showAutoTradeMsg(
-          autoTradeStatus.flexible_mode ? '已切换为固定模式' : '已切换为灵活模式', 
+          autoTradeStatus.flexible_mode ? 'Switched to fixed mode' : 'Switched to flexible mode',
           'success'
         );
       } else {
-        showAutoTradeMsg(result.error || '切换失败', 'error');
+        showAutoTradeMsg(result.error || 'Failed to switch mode', 'error');
       }
       await fetchAutoTradeStatus();
     } catch (error) {
-      showAutoTradeMsg('切换失败', 'error');
+      showAutoTradeMsg('Failed to switch mode', 'error');
     }
     setAutoTradeLoading(false);
   };
 
-  // 更新最大合同数
+  // Update maximum contracts.
   const handleUpdateMaxContracts = async () => {
     const count = parseInt(maxContractsInput);
     if (isNaN(count) || count < 1) {
-      showAutoTradeMsg('请输入有效的合同数（≥1）', 'error');
+      showAutoTradeMsg('Enter a valid contract count (≥1)', 'error');
       return;
     }
     setAutoTradeLoading(true);
     try {
       const result = await updateAutoTradeSettings(apiBaseUrl, { max_contracts: count });
-      if (result.success) showAutoTradeMsg('最大合同数已更新', 'success');
-      else showAutoTradeMsg(result.error || '更新失败', 'error');
+      if (result.success) showAutoTradeMsg('Maximum contracts updated', 'success');
+      else showAutoTradeMsg(result.error || 'Failed to update settings', 'error');
       await fetchAutoTradeStatus();
     } catch (error) {
-      showAutoTradeMsg('更新失败', 'error');
+      showAutoTradeMsg('Failed to update settings', 'error');
     }
     setAutoTradeLoading(false);
   };
 
-  // 更新最低合同数
+  // Update minimum contracts.
   const handleUpdateMinContracts = async () => {
     const count = parseInt(minContractsInput);
     if (isNaN(count) || count < 1) {
-      showAutoTradeMsg('请输入有效的合同数（≥1）', 'error');
+      showAutoTradeMsg('Enter a valid contract count (≥1)', 'error');
       return;
     }
     setAutoTradeLoading(true);
     try {
       const result = await updateAutoTradeSettings(apiBaseUrl, { min_contracts: count });
-      if (result.success) showAutoTradeMsg('最低合同数已更新', 'success');
-      else showAutoTradeMsg(result.error || '更新失败', 'error');
+      if (result.success) showAutoTradeMsg('Minimum contracts updated', 'success');
+      else showAutoTradeMsg(result.error || 'Failed to update settings', 'error');
       await fetchAutoTradeStatus();
     } catch (error) {
-      showAutoTradeMsg('更新失败', 'error');
+      showAutoTradeMsg('Failed to update settings', 'error');
+    }
+    setAutoTradeLoading(false);
+  };
+
+  const handleUpdateNeutralizationLoss = async () => {
+    const cents = parseInt(neutralizationLossInput);
+    if (isNaN(cents) || cents < 0 || cents > 99) {
+      showAutoTradeMsg('Enter a close-loss bound from 0 to 99 cents', 'error');
+      return;
+    }
+    setAutoTradeLoading(true);
+    try {
+      const result = await updateAutoTradeSettings(apiBaseUrl, {
+        neutralization_max_loss_cents: cents,
+      });
+      if (result.success) showAutoTradeMsg('Close-loss bound updated', 'success');
+      else showAutoTradeMsg(result.error || 'Failed to update close-loss bound', 'error');
+      await fetchAutoTradeStatus();
+    } catch (error) {
+      showAutoTradeMsg('Failed to update close-loss bound', 'error');
     }
     setAutoTradeLoading(false);
   };
   
-  // 当收到新数据时闪烁动画
+  // Flash when new data arrives.
   useEffect(() => {
     if (updateCount > 0) {
       setIsFlashing(true);
@@ -294,7 +401,7 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
     }
   }, [updateCount]);
 
-  // 定期获取账户余额
+  // Fetch account balances periodically.
   useEffect(() => {
     const fetchBalance = async () => {
       try {
@@ -304,25 +411,25 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
           setAccountBalance(data);
         }
       } catch (error) {
-        // 静默失败
+        // Fail silently.
       }
     };
 
-    // 初始获取
+    // Fetch initially.
     fetchBalance();
-    // 每 10 秒更新一次
-    const interval = setInterval(fetchBalance, 10000);
+    // Account endpoints are rate-limited; refresh at a sustainable cadence.
+    const interval = setInterval(fetchBalance, 60000);
     return () => clearInterval(interval);
   }, [apiBaseUrl]);
 
-  // 每秒刷新显示时间
+  // Refresh displayed time every second.
   const [, setTick] = useState(0);
   useEffect(() => {
     const timer = setInterval(() => setTick(t => t + 1), 1000);
     return () => clearInterval(timer);
   }, []);
 
-  // 计算覆盖率百分比
+  // Calculate coverage percentage.
   const getCoveragePercent = () => {
     if (dataCoverage.total_markets === 0) return 0;
     return Math.round((dataCoverage.both_ready / dataCoverage.total_markets) * 100);
@@ -330,14 +437,14 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
 
   const coveragePercent = getCoveragePercent();
 
-  // 格式化延迟显示
+  // Format displayed latency.
   const formatLatency = (latencyMs?: number) => {
     if (latencyMs === undefined || latencyMs === null) return '--';
     if (latencyMs < 1000) return `${latencyMs}ms`;
     return `${(latencyMs / 1000).toFixed(1)}s`;
   };
 
-  // 获取延迟颜色
+  // Get latency color.
   const getLatencyColor = (latencyMs?: number) => {
     if (latencyMs === undefined || latencyMs === null) return 'text-gray-500';
     if (latencyMs < 100) return 'text-green-400';
@@ -346,7 +453,7 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
     return 'text-red-400';
   };
 
-  // 格式化余额显示
+  // Format displayed balance.
   const formatBalance = (balance?: number) => {
     if (balance === undefined || balance === null) return '--';
     return balance >= 1000 ? `${(balance / 1000).toFixed(1)}k` : balance.toFixed(0);
@@ -355,53 +462,53 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
   return (
     <header className="border-b border-[--border-color] bg-[--bg-secondary]">
       <div className="px-2 h-10 flex items-center justify-between gap-2 overflow-x-auto">
-        {/* Logo - 紧凑版 */}
+        {/* Compact logo */}
         <div className="flex items-center gap-1 flex-shrink-0">
           <span className="text-sm">📊</span>
           <span className="font-semibold text-[--text-primary] text-xs">Arbitrage Scanner</span>
         </div>
 
-        {/* 统计信息 - 紧凑版 */}
+        {/* Compact statistics */}
         <div className="flex items-center gap-2 text-xs flex-shrink-0">
-          {/* 账户余额 */}
+          {/* Account balances */}
           {accountBalance && (
-            <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-[--bg-tertiary]" title={`账户余额\nKalshi: ${accountBalance.kalshi.available ? `$${formatBalance(accountBalance.kalshi.balance)}` : '未配置或获取失败'}\nPolymarket: ${accountBalance.polymarket.available ? `$${formatBalance(accountBalance.polymarket.balance)}` : '未配置或获取失败'}`}>
+            <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-[--bg-tertiary]" title={`Account Balances\nKalshi: ${accountBalance.kalshi.available ? `$${formatBalance(accountBalance.kalshi.balance)}` : 'Not configured or unavailable'}\nPolymarket: ${accountBalance.polymarket.available ? `$${formatBalance(accountBalance.polymarket.balance)}` : 'Not configured or unavailable'}`}>
               <span className="text-[10px] text-[--text-muted]">💰</span>
               <span className={`font-mono text-[10px] ${accountBalance.kalshi.available ? 'text-blue-400' : 'text-gray-500'}`} title={accountBalance.kalshi.error || ''}>
                 K:${accountBalance.kalshi.available ? formatBalance(accountBalance.kalshi.balance) : '--'}
               </span>
-              <span className={`font-mono text-[10px] ${accountBalance.polymarket.available ? 'text-purple-400' : 'text-gray-500'}`} title={accountBalance.polymarket.error || 'Polymarket 余额'}>
+              <span className={`font-mono text-[10px] ${accountBalance.polymarket.available ? 'text-purple-400' : 'text-gray-500'}`} title={accountBalance.polymarket.error || 'Polymarket balance'}>
                 P:${accountBalance.polymarket.available ? formatBalance(accountBalance.polymarket.balance) : '--'}
               </span>
             </div>
           )}
 
-          {/* 数据覆盖率 */}
-          <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-[--bg-tertiary]" title="数据覆盖率：两个平台都有实时数据的市场对数量">
+          {/* Data coverage */}
+          <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-[--bg-tertiary]" title="Data coverage: authoritative Kalshi and Polymarket REST quote availability">
             <span className={`font-mono text-[10px] ${dataCoverage.kalshi_connected ? 'text-blue-400' : 'text-gray-500'}`}>
-              K:{dataCoverage.kalshi_coverage}/{dataCoverage.polymarket_coverage}
+              K:REST {dataCoverage.kalshi_coverage}
             </span>
             <span className={`font-mono text-[10px] ${dataCoverage.polymarket_connected ? 'text-purple-400' : 'text-gray-500'}`}>
-              P:{dataCoverage.polymarket_coverage}/{dataCoverage.total_markets}
+              P:REST {dataCoverage.polymarket_coverage}
             </span>
             <span className={`font-mono text-[10px] font-semibold ${coveragePercent >= 80 ? 'text-green-400' : coveragePercent >= 50 ? 'text-yellow-400' : 'text-red-400'}`}>
               ✓{dataCoverage.both_ready}/{dataCoverage.total_markets}
             </span>
           </div>
 
-          {/* 平台延迟 */}
-          <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-[--bg-tertiary]" title="平台数据延迟">
-            <span className="text-[10px] text-[--text-muted]">WS:</span>
+          {/* Platform latency */}
+          <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-[--bg-tertiary]" title="Platform data freshness">
+            <span className="text-[10px] text-[--text-muted]">Feed:</span>
             <span className={`font-mono text-[10px] ${getLatencyColor(dataCoverage.kalshi_latency_ms)}`}>
-              K:{formatLatency(dataCoverage.kalshi_latency_ms)}
+              K:REST {formatLatency(dataCoverage.kalshi_latency_ms)}
             </span>
             <span className={`font-mono text-[10px] ${getLatencyColor(dataCoverage.polymarket_latency_ms)}`}>
-              P:{formatLatency(dataCoverage.polymarket_latency_ms)}
+              P:REST {formatLatency(dataCoverage.polymarket_latency_ms)}
             </span>
           </div>
 
-          {/* API 延迟 */}
-          <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-[--bg-tertiary]" title="API延迟">
+          {/* API latency */}
+          <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-[--bg-tertiary]" title="API latency">
             <span className="text-[10px] text-[--text-muted]">API:</span>
             <span className={`font-mono text-[10px] ${getLatencyColor(metrics?.api_latency.kalshi_ms)}`}>
               K:{formatLatency(metrics?.api_latency.kalshi_ms)}
@@ -423,7 +530,7 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
           
           <div className="h-3 w-px bg-[--border-color]" />
           
-          {/* 连接状态 */}
+          {/* Connection status */}
           <div className="flex items-center gap-1">
             <span className={`status-dot ${isConnected ? 'status-connected animate-pulse-dot' : 'status-disconnected'}`} />
             <span className={`text-[10px] ${isConnected ? 'text-green-400' : 'text-red-400'}`}>
@@ -433,7 +540,39 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
 
           <div className="h-3 w-px bg-[--border-color]" />
 
-          {/* 自动下单按钮 */}
+          {/* Page refresh controls */}
+          <div className="flex items-center gap-1">
+            <button
+              onClick={handleManualRefresh}
+              className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-gray-500/20 text-gray-300 hover:bg-gray-500/30 transition-colors"
+              title="Refresh the page now"
+            >
+              🔄
+            </button>
+            <input
+              type="number"
+              value={refreshSecondsInput}
+              onChange={(e) => setRefreshSecondsInput(e.target.value)}
+              min={MIN_AUTO_REFRESH_SECONDS}
+              className="w-12 text-[10px] px-1 py-0.5 rounded bg-[--bg-tertiary] border border-[--border-color] text-[--text-primary] text-center focus:outline-none focus:border-blue-500"
+              title={`Auto-refresh interval in seconds (min ${MIN_AUTO_REFRESH_SECONDS})`}
+            />
+            <button
+              onClick={handleToggleAutoRefresh}
+              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold font-mono transition-colors ${
+                autoRefreshEnabled
+                  ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
+                  : 'bg-gray-500/20 text-gray-400 hover:bg-gray-500/30'
+              }`}
+              title={autoRefreshEnabled ? 'Auto-refresh is on — click to stop' : 'Click to reload the page automatically on this interval'}
+            >
+              {autoRefreshEnabled ? `⏱ ${refreshCountdown ?? refreshSecondsInput}s` : 'Auto: Off'}
+            </button>
+          </div>
+
+          <div className="h-3 w-px bg-[--border-color]" />
+
+          {/* Automated trading button */}
           {autoTradeStatus && (
             <button
               onClick={() => setShowAutoTradeModal(true)}
@@ -442,25 +581,25 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
                   ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
                   : 'bg-gray-500/20 text-gray-400 hover:bg-gray-500/30'
               }`}
-              title="自动下单设置"
+              title="Automated Trading Settings"
             >
               <span>🤖</span>
-              <span>{autoTradeStatus.enabled ? '自动' : '手动'}</span>
+              <span>{autoTradeStatus.enabled ? 'Auto' : 'Manual'}</span>
               <span className="font-mono">{autoTradeStatus.trade_count}/{autoTradeStatus.max_trade_count}</span>
             </button>
           )}
 
-          {/* 设置按钮 */}
+          {/* Settings button */}
           <button
             onClick={() => setShowSettingsModal(true)}
             className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors"
-            title="应用设置"
+            title="Application Settings"
           >
             <span>⚙️</span>
-            <span>设置</span>
+            <span>Settings</span>
           </button>
 
-          {/* 用户信息 */}
+          {/* User information */}
           {username && (
             <div className="flex items-center gap-1 pl-2 border-l border-[--border-color]">
               <span className="text-[10px] text-[--text-secondary]">👤 {username}</span>
@@ -468,9 +607,9 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
                 <button
                   onClick={onLogout}
                   className="text-[10px] text-[--text-muted] hover:text-red-400 transition-colors px-1"
-                  title="退出登录"
+                  title="Log out"
                 >
-                  退出
+                  Log out
                 </button>
               )}
             </div>
@@ -478,18 +617,18 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
         </div>
       </div>
 
-      {/* 自动下单设置弹窗 */}
+      {/* Automated trading settings modal */}
       {showAutoTradeModal && autoTradeStatus && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowAutoTradeModal(false)}>
           <div 
             className="bg-[--bg-secondary] border border-[--border-color] rounded-lg shadow-xl w-80 max-w-[90vw]"
             onClick={(e) => e.stopPropagation()}
           >
-            {/* 弹窗头部 */}
+            {/* Modal header */}
             <div className="flex items-center justify-between px-4 py-3 border-b border-[--border-color]">
               <div className="flex items-center gap-2">
                 <span className="text-base">🤖</span>
-                <span className="font-semibold text-[--text-primary] text-sm">自动下单设置</span>
+                <span className="font-semibold text-[--text-primary] text-sm">Automated Trading Settings</span>
               </div>
               <button
                 onClick={() => setShowAutoTradeModal(false)}
@@ -499,18 +638,18 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
               </button>
             </div>
 
-            {/* 弹窗内容 */}
+            {/* Modal content */}
             <div className="p-4 space-y-4">
-              {/* 开关状态 */}
+              {/* Toggle state */}
               <div className="flex items-center justify-between">
-                <span className="text-sm text-[--text-secondary]">当前状态</span>
+                <span className="text-sm text-[--text-secondary]">Current Status</span>
                 <div className="flex items-center gap-2">
                   <span className={`text-xs px-2 py-1 rounded font-semibold ${
                     autoTradeStatus.enabled
                       ? 'bg-green-500/20 text-green-400'
                       : 'bg-gray-500/20 text-gray-400'
                   }`}>
-                    {autoTradeStatus.enabled ? '运行中' : '已关闭'}
+                    {autoTradeStatus.enabled ? 'Running' : 'Disabled'}
                   </span>
                   <button
                     onClick={handleAutoTradeToggle}
@@ -521,14 +660,14 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
                         : 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
                     } ${autoTradeLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                   >
-                    {autoTradeStatus.enabled ? '关闭' : '开启'}
+                    {autoTradeStatus.enabled ? 'Disable' : 'Enable'}
                   </button>
                 </div>
               </div>
 
-              {/* 下单次数 */}
+              {/* Trade count */}
               <div className="flex items-center justify-between">
-                <span className="text-sm text-[--text-secondary]">已下单次数</span>
+                <span className="text-sm text-[--text-secondary]">Trades Placed</span>
                 <div className="flex items-center gap-2">
                   <span className={`text-sm font-mono font-semibold ${
                     autoTradeStatus.remaining > 0 ? 'text-green-400' : 'text-red-400'
@@ -548,21 +687,21 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
                     disabled={autoTradeLoading}
                     className="text-xs px-2 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors disabled:opacity-50"
                   >
-                    更新
+                    Update
                   </button>
                   <button
                     onClick={handleAutoTradeReset}
                     disabled={autoTradeLoading}
                     className="text-xs px-2 py-1 rounded bg-orange-500/20 text-orange-400 hover:bg-orange-500/30 transition-colors disabled:opacity-50"
                   >
-                    重置
+                    Reset
                   </button>
                 </div>
               </div>
 
-              {/* 持续时间阈值 */}
+              {/* Duration threshold */}
               <div className="flex items-center justify-between">
-                <span className="text-sm text-[--text-secondary]">最小持续时间</span>
+                <span className="text-sm text-[--text-secondary]">Minimum Duration</span>
                 <div className="flex items-center gap-2">
                   <input
                     type="number"
@@ -578,44 +717,44 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
                     disabled={autoTradeLoading}
                     className="text-xs px-2 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors disabled:opacity-50"
                   >
-                    更新
+                    Update
                   </button>
                 </div>
               </div>
 
-              {/* 单次最大金额 */}
+              {/* Maximum amount per trade */}
               <div className="flex items-center justify-between">
-                <span className="text-sm text-[--text-secondary]">单次最大金额</span>
+                <span className="text-sm text-[--text-secondary]">Maximum Amount per Trade</span>
                 <span className="text-sm font-mono text-[--text-primary]">${autoTradeStatus.max_amount}</span>
               </div>
 
-              {/* 分隔线 */}
+              {/* Divider */}
               <div className="border-t border-[--border-color] my-2"></div>
 
-              {/* 下单模式 */}
+              {/* Order mode */}
               <div className="flex items-center justify-between">
-                <span className="text-sm text-[--text-secondary]">下单模式</span>
+                <span className="text-sm text-[--text-secondary]">Order Mode</span>
                 <div className="flex items-center gap-2">
                   <span className={`text-xs px-2 py-1 rounded font-semibold ${
                     autoTradeStatus.flexible_mode
                       ? 'bg-purple-500/20 text-purple-400'
                       : 'bg-blue-500/20 text-blue-400'
                   }`}>
-                    {autoTradeStatus.flexible_mode ? '灵活模式' : '固定模式'}
+                    {autoTradeStatus.flexible_mode ? 'Flexible Mode' : 'Fixed Mode'}
                   </span>
                   <button
                     onClick={handleToggleFlexibleMode}
                     disabled={autoTradeLoading}
                     className="text-xs px-2 py-1 rounded bg-gray-500/20 text-gray-300 hover:bg-gray-500/30 transition-colors disabled:opacity-50"
                   >
-                    切换
+                    Switch
                   </button>
                 </div>
               </div>
 
-              {/* 最大合同数 */}
+              {/* Maximum contracts */}
               <div className="flex items-center justify-between">
-                <span className="text-sm text-[--text-secondary]">单次最大合同</span>
+                <span className="text-sm text-[--text-secondary]">Maximum Contracts per Trade</span>
                 <div className="flex items-center gap-2">
                   <input
                     type="number"
@@ -624,20 +763,20 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
                     className="w-16 text-xs px-2 py-1 rounded bg-[--bg-primary] border border-[--border-color] text-[--text-primary] focus:outline-none focus:border-blue-500 text-center"
                     min="1"
                   />
-                  <span className="text-xs text-[--text-muted]">份</span>
+                  <span className="text-xs text-[--text-muted]">contracts</span>
                   <button
                     onClick={handleUpdateMaxContracts}
                     disabled={autoTradeLoading}
                     className="text-xs px-2 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors disabled:opacity-50"
                   >
-                    更新
+                    Update
                   </button>
                 </div>
               </div>
 
-              {/* 最低合同数 */}
+              {/* Minimum contracts */}
               <div className="flex items-center justify-between">
-                <span className="text-sm text-[--text-secondary]">最低合同门槛</span>
+                <span className="text-sm text-[--text-secondary]">Minimum Contract Threshold</span>
                 <div className="flex items-center gap-2">
                   <input
                     type="number"
@@ -646,28 +785,54 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
                     className="w-16 text-xs px-2 py-1 rounded bg-[--bg-primary] border border-[--border-color] text-[--text-primary] focus:outline-none focus:border-blue-500 text-center"
                     min="1"
                   />
-                  <span className="text-xs text-[--text-muted]">份</span>
+                  <span className="text-xs text-[--text-muted]">contracts</span>
                   <button
                     onClick={handleUpdateMinContracts}
                     disabled={autoTradeLoading}
                     className="text-xs px-2 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors disabled:opacity-50"
                   >
-                    更新
+                    Update
                   </button>
+                </div>
+
+                {/* Bounded exposure neutralization */}
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-sm text-[--text-secondary]">Emergency Close Loss Bound</span>
+                    <p className="text-[10px] text-[--text-muted]">Maximum adverse price allowed for a partial-fill close</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      value={neutralizationLossInput}
+                      onChange={(e) => setNeutralizationLossInput(e.target.value)}
+                      className="w-12 text-xs px-2 py-1 rounded bg-[--bg-primary] border border-[--border-color] text-[--text-primary] focus:outline-none focus:border-blue-500 text-center"
+                      min="0"
+                      max="99"
+                    />
+                    <span className="text-xs text-[--text-muted]">¢</span>
+                    <button
+                      onClick={handleUpdateNeutralizationLoss}
+                      disabled={autoTradeLoading}
+                      className="text-xs px-2 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors disabled:opacity-50"
+                    >
+                      Update
+                    </button>
+                  </div>
                 </div>
               </div>
 
-              {/* 上次下单时间 */}
+              {/* Last trade time */}
               {autoTradeStatus.last_trade_time && (
                 <div className="flex items-center justify-between">
-                  <span className="text-sm text-[--text-secondary]">上次下单</span>
+                  <span className="text-sm text-[--text-secondary]">Last Trade</span>
                   <span className="text-xs text-[--text-muted]">
                     {new Date(autoTradeStatus.last_trade_time).toLocaleString()}
                   </span>
                 </div>
               )}
 
-              {/* 消息提示 */}
+              {/* Status message */}
               {autoTradeMessage && (
                 <div className={`text-xs px-3 py-2 rounded ${
                   autoTradeMessage.type === 'success'
@@ -679,31 +844,32 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
               )}
             </div>
 
-            {/* 弹窗底部说明 */}
+            {/* Modal footer */}
             <div className="px-4 py-3 border-t border-[--border-color] bg-[--bg-tertiary] rounded-b-lg">
               <p className="text-[10px] text-[--text-muted] leading-relaxed">
                 💡 {autoTradeStatus.flexible_mode 
-                  ? `灵活模式：深度10-20时下${autoTradeStatus.min_contracts}份，深度≥20时下深度的一半（上限${autoTradeStatus.max_contracts}份）` 
-                  : `固定模式：每次固定下${autoTradeStatus.min_contracts}份合同`
-                }。双平台深度都需≥{autoTradeStatus.min_contracts}份才会下单。
+                  ? `Flexible mode: trade ${autoTradeStatus.min_contracts} contracts at depth 10–20, or half the depth at ≥20 (up to ${autoTradeStatus.max_contracts} contracts)`
+                  : `Fixed mode: trade ${autoTradeStatus.min_contracts} contracts each time`
+                }. Both platforms must have depth of at least {autoTradeStatus.min_contracts} contracts before trading.
+                A partial or one-leg fill is closed only within the configured {autoTradeStatus.neutralization_max_loss_cents}¢ bound; otherwise auto-trading halts.
               </p>
             </div>
           </div>
         </div>
       )}
 
-      {/* 应用设置弹窗 */}
+      {/* Application settings modal */}
       {showSettingsModal && appSettings && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowSettingsModal(false)}>
           <div 
             className="bg-[--bg-secondary] border border-[--border-color] rounded-lg shadow-xl w-96 max-w-[90vw]"
             onClick={(e) => e.stopPropagation()}
           >
-            {/* 弹窗头部 */}
+            {/* Modal header */}
             <div className="flex items-center justify-between px-4 py-3 border-b border-[--border-color]">
               <div className="flex items-center gap-2">
                 <span className="text-base">⚙️</span>
-                <span className="font-semibold text-[--text-primary] text-sm">应用设置</span>
+                <span className="font-semibold text-[--text-primary] text-sm">Application Settings</span>
               </div>
               <button
                 onClick={() => setShowSettingsModal(false)}
@@ -713,13 +879,13 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
               </button>
             </div>
 
-            {/* 弹窗内容 */}
+            {/* Modal content */}
             <div className="p-4 space-y-4">
-              {/* 刷新间隔 */}
+              {/* Refresh interval */}
               <div className="flex items-center justify-between">
                 <div>
-                  <span className="text-sm text-[--text-secondary]">数据刷新间隔</span>
-                  <p className="text-[10px] text-[--text-muted]">定时扫描市场的间隔</p>
+                  <span className="text-sm text-[--text-secondary]">Data Refresh Interval</span>
+                  <p className="text-[10px] text-[--text-muted]">Interval for scheduled market scans</p>
                 </div>
                 <div className="flex items-center gap-2">
                   <input
@@ -729,15 +895,15 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
                     className="w-16 text-xs px-2 py-1 rounded bg-[--bg-primary] border border-[--border-color] text-[--text-primary] focus:outline-none focus:border-blue-500 text-right"
                     min="1"
                   />
-                  <span className="text-xs text-[--text-muted]">秒</span>
+                  <span className="text-xs text-[--text-muted]">seconds</span>
                 </div>
               </div>
 
-              {/* 最小利润率 */}
+              {/* Minimum profit margin */}
               <div className="flex items-center justify-between">
                 <div>
-                  <span className="text-sm text-[--text-secondary]">最小利润率</span>
-                  <p className="text-[10px] text-[--text-muted]">低于此利润率的机会不显示</p>
+                  <span className="text-sm text-[--text-secondary]">Minimum Profit Margin</span>
+                  <p className="text-[10px] text-[--text-muted]">Hide opportunities below this profit margin</p>
                 </div>
                 <div className="flex items-center gap-2">
                   <input
@@ -752,11 +918,11 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
                 </div>
               </div>
 
-              {/* 默认下注金额 */}
+              {/* Default bet amount */}
               <div className="flex items-center justify-between">
                 <div>
-                  <span className="text-sm text-[--text-secondary]">默认下注金额</span>
-                  <p className="text-[10px] text-[--text-muted]">套利计算使用的默认金额</p>
+                  <span className="text-sm text-[--text-secondary]">Default Bet Amount</span>
+                  <p className="text-[10px] text-[--text-muted]">Default amount used for arbitrage calculations</p>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-[--text-muted]">$</span>
@@ -771,11 +937,11 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
                 </div>
               </div>
 
-              {/* 追踪阈值 */}
+              {/* Tracking threshold */}
               <div className="flex items-center justify-between">
                 <div>
-                  <span className="text-sm text-[--text-secondary]">追踪阈值</span>
-                  <p className="text-[10px] text-[--text-muted]">超过此利润率开始记录追踪</p>
+                  <span className="text-sm text-[--text-secondary]">Tracking Threshold</span>
+                  <p className="text-[10px] text-[--text-muted]">Start tracking when this profit margin is exceeded</p>
                 </div>
                 <div className="flex items-center gap-2">
                   <input
@@ -790,18 +956,18 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
                 </div>
               </div>
 
-              {/* 保存按钮 */}
+              {/* Save button */}
               <div className="flex justify-end pt-2">
                 <button
                   onClick={handleUpdateSettings}
                   disabled={settingsLoading}
                   className="px-4 py-1.5 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors text-xs font-semibold disabled:opacity-50"
                 >
-                  {settingsLoading ? '保存中...' : '保存设置'}
+                  {settingsLoading ? 'Saving...' : 'Save Settings'}
                 </button>
               </div>
 
-              {/* 消息提示 */}
+              {/* Status message */}
               {settingsMessage && (
                 <div className={`text-xs px-3 py-2 rounded ${
                   settingsMessage.type === 'success'
@@ -813,10 +979,10 @@ export function Header({ isConnected, stats, totalProfit, lastUpdateTime: _lastU
               )}
             </div>
 
-            {/* 弹窗底部说明 */}
+            {/* Modal footer */}
             <div className="px-4 py-3 border-t border-[--border-color] bg-[--bg-tertiary] rounded-b-lg">
               <p className="text-[10px] text-[--text-muted] leading-relaxed">
-                💡 设置保存后会立即生效。部分设置（如刷新间隔）需要重启服务才能完全生效。
+                💡 Settings take effect immediately. Some settings, such as the refresh interval, require a service restart to be fully applied.
               </p>
             </div>
           </div>

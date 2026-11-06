@@ -8,10 +8,11 @@
 //! - `settings_repo`: Application settings
 //! - `excluded_markets_repo`: Excluded markets for auto-trade
 
-mod tracking_repo;
 mod auto_trade_repo;
-mod settings_repo;
+mod directional_repo;
 mod excluded_markets_repo;
+mod settings_repo;
+mod tracking_repo;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -26,8 +27,8 @@ use tracing::{error, info};
 use crate::models::ArbitrageTrackingRecord;
 
 // Re-export types from sub-modules
-pub use auto_trade_repo::{AutoTradeState, AutoTradeRecord};
-pub use settings_repo::AppSettings;
+pub use auto_trade_repo::{AutoTradeExecutionRecord, AutoTradeRecord, AutoTradeState};
+pub use directional_repo::{DirectionalPosition, NewDirectionalDecision, NewDirectionalPosition};
 
 /// Storage command for async queue
 pub enum StorageCommand {
@@ -36,14 +37,12 @@ pub enum StorageCommand {
         id: String,
         profit_margin: f64,
     },
+    TrackDepth {
+        id: String,
+        poly_ask_depth: f64,
+        poly_ask_size: f64,
+    },
     TrackEnd(String),
-}
-
-/// Storage statistics
-#[derive(Debug, Clone)]
-pub struct StorageStats {
-    pub total_records: usize,
-    pub active_records: usize,
 }
 
 /// Arbitrage storage service
@@ -63,8 +62,9 @@ impl ArbitrageStorage {
         Self::init_auto_trade_tables(&conn)?;
         Self::init_settings_table(&conn)?;
         Self::init_excluded_markets_table(&conn)?;
+        Self::init_directional_tables(&conn)?;
 
-        info!("📦 数据库初始化完成，包含 auto_trade_state, auto_trade_history, app_settings 和 excluded_markets 表");
+        info!("📦 Database initialized with auto_trade_state, auto_trade_history, app_settings, and excluded_markets tables");
 
         let conn = Arc::new(Mutex::new(conn));
 
@@ -77,7 +77,7 @@ impl ArbitrageStorage {
             while let Some(cmd) = command_rx.recv().await {
                 let conn = conn_clone.lock();
                 if let Err(e) = Self::execute_command(&conn, cmd) {
-                    error!("存储错误: {}", e);
+                    error!("Storage error: {:#}", e);
                 }
             }
         });
@@ -166,7 +166,7 @@ impl ArbitrageStorage {
             "ALTER TABLE auto_trade_state ADD COLUMN min_duration_ms INTEGER DEFAULT 500",
             [],
         );
-        // 新增：灵活下单模式相关字段
+        // Added: flexible auto-trade mode fields
         let _ = conn.execute(
             "ALTER TABLE auto_trade_state ADD COLUMN flexible_mode INTEGER DEFAULT 0",
             [],
@@ -177,6 +177,10 @@ impl ArbitrageStorage {
         );
         let _ = conn.execute(
             "ALTER TABLE auto_trade_state ADD COLUMN min_contracts INTEGER DEFAULT 10",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE auto_trade_state ADD COLUMN neutralization_max_loss_cents INTEGER DEFAULT 5",
             [],
         );
 
@@ -236,13 +240,57 @@ impl ArbitrageStorage {
             "ALTER TABLE auto_trade_history ADD COLUMN total_duration_ms INTEGER DEFAULT 0",
             [],
         );
-        // 新增：分别记录两个平台的API延迟
+        // Added: record API latency separately for each platform
         let _ = conn.execute(
             "ALTER TABLE auto_trade_history ADD COLUMN kalshi_latency_ms INTEGER DEFAULT 0",
             [],
         );
         let _ = conn.execute(
             "ALTER TABLE auto_trade_history ADD COLUMN poly_latency_ms INTEGER DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE auto_trade_history ADD COLUMN kalshi_filled_contracts INTEGER DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE auto_trade_history ADD COLUMN polymarket_filled_contracts INTEGER DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE auto_trade_history ADD COLUMN kalshi_order_status TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE auto_trade_history ADD COLUMN polymarket_order_status TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE auto_trade_history ADD COLUMN neutralization_leg TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE auto_trade_history ADD COLUMN neutralization_success INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE auto_trade_history ADD COLUMN neutralization_order_id TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE auto_trade_history ADD COLUMN neutralization_filled_contracts INTEGER DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE auto_trade_history ADD COLUMN neutralization_error TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE auto_trade_history ADD COLUMN residual_leg TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE auto_trade_history ADD COLUMN residual_contracts INTEGER DEFAULT 0",
             [],
         );
 
@@ -293,10 +341,7 @@ impl ArbitrageStorage {
         )?;
 
         // Migrate existing table: add game_date column if it doesn't exist
-        let _ = conn.execute(
-            "ALTER TABLE excluded_markets ADD COLUMN game_date TEXT",
-            [],
-        );
+        let _ = conn.execute("ALTER TABLE excluded_markets ADD COLUMN game_date TEXT", []);
 
         Ok(())
     }
@@ -341,6 +386,19 @@ impl ArbitrageStorage {
                         update_count = update_count + 1
                     WHERE id = ?2",
                     params![profit_margin, id],
+                )?;
+            }
+            StorageCommand::TrackDepth {
+                id,
+                poly_ask_depth,
+                poly_ask_size,
+            } => {
+                conn.execute(
+                    "UPDATE arbitrage_tracking
+                    SET poly_ask_depth = ?1,
+                        poly_ask_size = ?2
+                    WHERE id = ?3",
+                    params![poly_ask_depth, poly_ask_size, id],
                 )?;
             }
             StorageCommand::TrackEnd(id) => {

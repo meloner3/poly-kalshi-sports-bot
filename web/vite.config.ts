@@ -4,7 +4,7 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   server: {
-    port: 5175, // 改为 5175 避免端口冲突
+    port: 5175, // Use 5175 to avoid port conflicts
     proxy: {
       '/api': {
         target: 'http://localhost:3000',

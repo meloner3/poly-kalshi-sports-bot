@@ -2,15 +2,29 @@
 //!
 //! Handles tracking of high-profit arbitrage opportunities.
 
-use chrono::Utc;
-use tracing::info;
+use std::time::{Duration, Instant};
 
-use crate::models::{ArbitrageOpportunity, ArbitrageTrackingRecord};
+use chrono::Utc;
+use tracing::{debug, info};
+
 use super::WebSocketManager;
+use crate::models::{ArbitrageOpportunity, ArbitrageTrackingRecord, PolymarketUsExecution};
+
+/// A market flapping in and out of tracking (profit margin oscillating near
+/// the threshold) must not re-hit Polymarket's real book endpoint on every
+/// restart — that is what triggered a Cloudflare IP rate limit (error 1015)
+/// that then starved out the endpoint the real execution path depends on.
+/// One live snapshot per market within this window is enough for the
+/// Advanced Search "depth at tracking start" display.
+const POLY_DEPTH_SNAPSHOT_COOLDOWN: Duration = Duration::from_secs(600);
 
 impl WebSocketManager {
     /// Track a high-profit opportunity
-    pub(crate) fn track_opportunity(&self, opp: &ArbitrageOpportunity) {
+    pub(crate) fn track_opportunity(
+        &self,
+        opp: &ArbitrageOpportunity,
+        poly_execution: Option<PolymarketUsExecution>,
+    ) {
         let key = opp.market_key();
 
         let mut tracking = self.active_tracking.write();
@@ -47,13 +61,47 @@ impl WebSocketManager {
             };
 
             info!(
-                "📈 开始跟踪: {} {} - {:.2}% (poly_depth: ${:.2}, poly_size: {:.0}, kalshi_depth: {})",
+                "📈 Tracking started: {} {} - {:.2}% (poly_depth: ${:.2}, poly_size: {:.0}, kalshi_depth: {})",
                 opp.event_name, opp.team_name, opp.profit_margin,
                 opp.poly_ask_depth, opp.poly_ask_size, opp.kalshi_ask_depth
             );
 
             self.storage.track_start(record.clone());
-            tracking.insert(key, record);
+            tracking.insert(key.clone(), record);
+
+            // One real CLOB depth snapshot per tracked opportunity, for
+            // Advanced Search visibility only — never used for execution
+            // sizing, and never a substitute for the fresh book fetched
+            // immediately before an order in the auto-trade path. Skip it
+            // if this market was snapshotted recently, so a market flapping
+            // in and out of tracking can't repeatedly hit Polymarket's real
+            // gateway (see POLY_DEPTH_SNAPSHOT_COOLDOWN).
+            let recently_snapshotted = self
+                .poly_depth_snapshot_cooldown
+                .read()
+                .get(&key)
+                .is_some_and(|last| last.elapsed() < POLY_DEPTH_SNAPSHOT_COOLDOWN);
+
+            if !recently_snapshotted {
+                if let (Some(exec), Some(client)) = (poly_execution, self.polymarket_client.clone())
+                {
+                    self.poly_depth_snapshot_cooldown
+                        .write()
+                        .insert(key.clone(), Instant::now());
+                    let storage = self.storage.clone();
+                    tokio::spawn(async move {
+                        match client.get_market_book(&exec.market_slug).await {
+                            Ok(book) => {
+                                let (usd, size) = book.buy_depth(exec.position_side);
+                                storage.track_depth(&key, usd, size);
+                            }
+                            Err(error) => {
+                                debug!("Tracking depth snapshot failed for {}: {}", key, error);
+                            }
+                        }
+                    });
+                }
+            }
         }
     }
 
@@ -101,14 +149,18 @@ impl WebSocketManager {
     }
 
     /// Get active tracking records for auto-trade checking
-    pub fn get_active_tracking_for_auto_trade(&self) -> Vec<(String, ArbitrageTrackingRecord, i64)> {
+    pub fn get_active_tracking_for_auto_trade(
+        &self,
+    ) -> Vec<(String, ArbitrageTrackingRecord, i64)> {
         let now = Utc::now();
         let tracking = self.active_tracking.read();
-        
+
         tracking
             .iter()
             .map(|(key, record)| {
-                let duration_ms = now.signed_duration_since(record.start_time).num_milliseconds();
+                let duration_ms = now
+                    .signed_duration_since(record.start_time)
+                    .num_milliseconds();
                 (key.clone(), record.clone(), duration_ms)
             })
             .collect()
@@ -117,18 +169,18 @@ impl WebSocketManager {
     /// Get current opportunity by key
     pub fn get_opportunity_by_key(&self, key: &str) -> Option<ArbitrageOpportunity> {
         let opps = self.opportunities.read();
-        opps.iter()
-            .find(|o| o.market_key() == key)
-            .cloned()
+        opps.iter().find(|o| o.market_key() == key).cloned()
     }
 
     /// Get tracking record and duration by key
     pub fn get_tracking_record(&self, key: &str) -> Option<(ArbitrageTrackingRecord, i64)> {
         let now = Utc::now();
         let tracking = self.active_tracking.read();
-        
+
         tracking.get(key).map(|record| {
-            let duration_ms = now.signed_duration_since(record.start_time).num_milliseconds();
+            let duration_ms = now
+                .signed_duration_since(record.start_time)
+                .num_milliseconds();
             (record.clone(), duration_ms)
         })
     }

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl:*localhost:8000/api/order*)",
+      "Bash(curl:*localhost:8000/api/arbitrage/execute*)"
+    ]
+  }
+}

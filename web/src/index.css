@@ -31,7 +31,7 @@ body {
   min-height: 100vh;
 }
 
-/* 自定义滚动条 */
+/* Custom scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -50,7 +50,7 @@ body {
   background: var(--text-muted);
 }
 
-/* 表格样式 */
+/* Table styles */
 table {
   border-collapse: collapse;
   width: 100%;
@@ -79,7 +79,7 @@ tbody tr:hover {
   background: var(--bg-secondary);
 }
 
-/* 脉冲动画 */
+/* Pulse animation */
 @keyframes pulse-dot {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
@@ -89,17 +89,17 @@ tbody tr:hover {
   animation: pulse-dot 2s ease-in-out infinite;
 }
 
-/* 数字字体 */
+/* Tabular numerals */
 .tabular-nums {
   font-variant-numeric: tabular-nums;
 }
 
-/* 利润颜色 */
+/* Profit colors */
 .profit-high { color: var(--accent-green); }
 .profit-medium { color: var(--accent-yellow); }
 .profit-low { color: var(--text-secondary); }
 
-/* 状态指示器 */
+/* Status indicators */
 .status-dot {
   width: 6px;
   height: 6px;
@@ -110,14 +110,14 @@ tbody tr:hover {
 .status-connected { background: var(--accent-green); }
 .status-disconnected { background: var(--accent-red); }
 
-/* 卡片样式 */
+/* Card styles */
 .card {
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: 6px;
 }
 
-/* 价格标签 */
+/* Price labels */
 .price-tag {
   font-family: 'JetBrains Mono', monospace;
   font-size: 12px;
@@ -130,7 +130,7 @@ tbody tr:hover {
 .price-kalshi { background: rgba(59, 130, 246, 0.15); }
 .price-poly { background: rgba(139, 92, 246, 0.15); }
 
-/* 实时更新闪烁动画 */
+/* Real-time update flash animation */
 @keyframes flash-update {
   0% { 
     background: rgba(16, 185, 129, 0.3);
@@ -146,7 +146,7 @@ tbody tr:hover {
   animation: flash-update 0.5s ease-out;
 }
 
-/* 价格更新动画 */
+/* Price update animation */
 @keyframes price-flash {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
@@ -156,7 +156,7 @@ tbody tr:hover {
   animation: price-flash 0.3s ease-in-out;
 }
 
-/* Live 指示器呼吸效果 */
+/* Live indicator pulse effect */
 @keyframes glow-pulse {
   0%, 100% {
     box-shadow: 0 0 3px var(--accent-green);
@@ -170,7 +170,7 @@ tbody tr:hover {
   animation: glow-pulse 2s ease-in-out infinite;
 }
 
-/* 表格行渐变过渡 */
+/* Table row transition */
 tbody tr {
   transition: all 0.2s ease;
 }

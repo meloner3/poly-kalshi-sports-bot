@@ -9,6 +9,7 @@ import {
   PolymarketOrderResponse,
   PolymarketOrdersResponse,
   PolymarketPosition,
+  UnifiedPositionsResponse,
   ArbitrageExecuteRequest,
   ArbitrageExecuteResponse
 } from '../types';
@@ -16,7 +17,7 @@ import {
 const API_BASE = '/api';
 
 /**
- * 获取认证头
+ * Gets authentication headers.
  */
 function getAuthHeaders(): HeadersInit {
   const token = localStorage.getItem('auth_token');
@@ -34,7 +35,7 @@ function getAuthHeaders(): HeadersInit {
 export async function fetchKalshiMarkets(): Promise<Market[]> {
   const response = await fetch(`${API_BASE}/markets/kalshi`);
   if (!response.ok) {
-    throw new Error('获取 Kalshi 市场失败');
+    throw new Error('Failed to fetch Kalshi markets');
   }
   return response.json();
 }
@@ -42,7 +43,7 @@ export async function fetchKalshiMarkets(): Promise<Market[]> {
 export async function fetchPolymarketMarkets(): Promise<Market[]> {
   const response = await fetch(`${API_BASE}/markets/polymarket`);
   if (!response.ok) {
-    throw new Error('获取 Polymarket 市场失败');
+    throw new Error('Failed to fetch Polymarket markets');
   }
   return response.json();
 }
@@ -50,7 +51,7 @@ export async function fetchPolymarketMarkets(): Promise<Market[]> {
 export async function fetchOpportunities(): Promise<ScanResponse> {
   const response = await fetch(`${API_BASE}/opportunities`);
   if (!response.ok) {
-    throw new Error('获取套利机会失败');
+    throw new Error('Failed to fetch arbitrage opportunities');
   }
   return response.json();
 }
@@ -60,7 +61,7 @@ export async function triggerScan(): Promise<ScanResponse> {
     method: 'POST',
   });
   if (!response.ok) {
-    throw new Error('触发扫描失败');
+    throw new Error('Failed to trigger scan');
   }
   return response.json();
 }
@@ -68,15 +69,15 @@ export async function triggerScan(): Promise<ScanResponse> {
 export async function checkHealth(): Promise<{ status: string; version: string }> {
   const response = await fetch(`${API_BASE}/health`);
   if (!response.ok) {
-    throw new Error('健康检查失败');
+    throw new Error('Health check failed');
   }
   return response.json();
 }
 
-// ==================== 交易相关 API ====================
+// ==================== Trading APIs ====================
 
 /**
- * 创建 Kalshi 市价订单
+ * Creates a Kalshi market order.
  */
 export async function createKalshiOrder(
   baseUrl: string,
@@ -91,7 +92,7 @@ export async function createKalshiOrder(
 }
 
 /**
- * 获取 Kalshi 订单列表
+ * Gets Kalshi orders.
  */
 export async function getKalshiOrders(
   baseUrl: string,
@@ -105,7 +106,7 @@ export async function getKalshiOrders(
 }
 
 /**
- * 获取 Kalshi 持仓列表
+ * Gets Kalshi positions.
  */
 export async function getKalshiPositions(
   baseUrl: string
@@ -115,7 +116,7 @@ export async function getKalshiPositions(
 }
 
 /**
- * 取消 Kalshi 订单
+ * Cancels a Kalshi order.
  */
 export async function cancelKalshiOrder(
   baseUrl: string,
@@ -127,10 +128,10 @@ export async function cancelKalshiOrder(
   return response.json();
 }
 
-// ==================== Polymarket 交易 API ====================
+// ==================== Polymarket Trading APIs ====================
 
 /**
- * 创建 Polymarket 市价订单
+ * Creates a Polymarket market order.
  */
 export async function createPolymarketOrder(
   baseUrl: string,
@@ -145,7 +146,7 @@ export async function createPolymarketOrder(
 }
 
 /**
- * 获取 Polymarket 订单列表
+ * Gets Polymarket orders.
  */
 export async function getPolymarketOrders(
   baseUrl: string
@@ -155,7 +156,7 @@ export async function getPolymarketOrders(
 }
 
 /**
- * 取消 Polymarket 订单
+ * Cancels a Polymarket order.
  */
 export async function cancelPolymarketOrder(
   baseUrl: string,
@@ -168,7 +169,7 @@ export async function cancelPolymarketOrder(
 }
 
 /**
- * 获取 Polymarket 持仓列表
+ * Gets Polymarket positions.
  */
 export async function getPolymarketPositions(
   baseUrl: string
@@ -177,10 +178,23 @@ export async function getPolymarketPositions(
   return response.json();
 }
 
-// ==================== 套利执行 API ====================
+/**
+ * Gets positions grouped into hedged pairs and standalone legs.
+ */
+export async function getUnifiedPositions(
+  baseUrl: string
+): Promise<UnifiedPositionsResponse> {
+  const response = await fetch(`${baseUrl}/api/positions/unified`);
+  if (!response.ok) {
+    throw new Error(`Positions request failed (${response.status})`);
+  }
+  return response.json();
+}
+
+// ==================== Arbitrage Execution APIs ====================
 
 /**
- * 执行套利交易（同时在两个平台下单）
+ * Executes an arbitrage trade by placing orders on both platforms.
  */
 export async function executeArbitrage(
   baseUrl: string,
@@ -191,13 +205,17 @@ export async function executeArbitrage(
     headers: getAuthHeaders(),
     body: JSON.stringify(request),
   });
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    throw new Error(await response.text());
+  }
   return response.json();
 }
 
-// ==================== 自动下单 API ====================
+// ==================== Automated Trading APIs ====================
 
 /**
- * 自动下单状态响应类型
+ * Automated trading status response type.
  */
 export interface AutoTradeStatus {
   enabled: boolean;
@@ -206,17 +224,19 @@ export interface AutoTradeStatus {
   remaining: number;
   max_amount: number;
   min_duration_ms: number;
-  /** 是否启用灵活下单模式 */
+  /** Whether flexible order sizing is enabled. */
   flexible_mode: boolean;
-  /** 单次最大合同数 */
+  /** Maximum contracts per trade. */
   max_contracts: number;
-  /** 最低合同数（深度低于此值不下单） */
+  /** Minimum contracts required to trade. */
   min_contracts: number;
+  /** Maximum adverse price allowed for an emergency close, in cents/contract. */
+  neutralization_max_loss_cents: number;
   last_trade_time: string | null;
 }
 
 /**
- * 获取自动下单状态
+ * Gets automated trading status.
  */
 export async function getAutoTradeStatus(
   baseUrl: string
@@ -226,7 +246,7 @@ export async function getAutoTradeStatus(
 }
 
 /**
- * 开启自动下单
+ * Enables automated trading.
  */
 export async function enableAutoTrade(
   baseUrl: string
@@ -239,7 +259,7 @@ export async function enableAutoTrade(
 }
 
 /**
- * 关闭自动下单
+ * Disables automated trading.
  */
 export async function disableAutoTrade(
   baseUrl: string
@@ -252,7 +272,7 @@ export async function disableAutoTrade(
 }
 
 /**
- * 重置自动下单次数
+ * Resets the automated trade count.
  */
 export async function resetAutoTradeCount(
   baseUrl: string
@@ -265,7 +285,7 @@ export async function resetAutoTradeCount(
 }
 
 /**
- * 更新自动下单设置
+ * Updates automated trading settings.
  */
 export async function updateAutoTradeSettings(
   baseUrl: string,
@@ -273,12 +293,14 @@ export async function updateAutoTradeSettings(
     max_amount?: number;
     min_duration_ms?: number;
     max_trade_count?: number;
-    /** 是否启用灵活下单模式 */
+    /** Whether flexible order sizing is enabled. */
     flexible_mode?: boolean;
-    /** 单次最大合同数 */
+    /** Maximum contracts per trade. */
     max_contracts?: number;
-    /** 最低合同数 */
+    /** Minimum contracts required. */
     min_contracts?: number;
+    /** Maximum adverse price allowed for an emergency close, in cents/contract. */
+    neutralization_max_loss_cents?: number;
   }
 ): Promise<{ success: boolean; message?: string; error?: string }> {
   const response = await fetch(`${baseUrl}/api/auto-trade/settings`, {
@@ -289,25 +311,25 @@ export async function updateAutoTradeSettings(
   return response.json();
 }
 
-// ==================== 应用设置 API ====================
+// ==================== Application Settings APIs ====================
 
 /**
- * 应用设置响应类型
+ * Application settings response type.
  */
 export interface AppSettings {
-  /** 数据刷新间隔（秒） */
+  /** Data refresh interval in seconds. */
   refresh_interval: number;
-  /** 显示套利机会的最小利润率（%） */
+  /** Minimum profit margin for displayed opportunities. */
   min_profit_margin: number;
-  /** 套利计算使用的默认金额（美元） */
+  /** Default USD amount used for arbitrage calculations. */
   default_bet_amount: number;
-  /** 开始追踪记录的利润率阈值（%） */
+  /** Profit margin threshold for starting tracking. */
   tracking_threshold: number;
   updated_at: string | null;
 }
 
 /**
- * 获取应用设置
+ * Gets application settings.
  */
 export async function getAppSettings(
   baseUrl: string
@@ -319,7 +341,7 @@ export async function getAppSettings(
 }
 
 /**
- * 更新应用设置
+ * Updates application settings.
  */
 export async function updateAppSettings(
   baseUrl: string,

@@ -7,7 +7,7 @@ use axum::{
 };
 use rust_embed::RustEmbed;
 
-// 前端静态文件，编译前需要先构建前端并复制到 rust-backend/static 目录
+// Frontend static files; build the frontend and copy it to rust-backend/static before compiling.
 #[derive(RustEmbed)]
 #[folder = "static"]
 struct Assets;
